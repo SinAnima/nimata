@@ -1,0 +1,75 @@
+@import "tailwindcss";
+
+/* Color tokens. One accent (ink blue); everything else is paper and slate. */
+:root {
+  --paper: #f3f5f6;
+  --surface: #fcfcfd;
+  --ink: #1f2933;
+  --muted: #5b6772;
+  --rule: #dfe3e7;
+  --accent: #2f5d8a;
+  --accent-soft: #e4ecf4;
+  --flash: #fbf1cf;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #15191c;
+    --surface: #1b2024;
+    --ink: #e2e6e9;
+    --muted: #97a2ac;
+    --rule: #2b3238;
+    --accent: #8fb7de;
+    --accent-soft: #1f2d3a;
+    --flash: #3a3422;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-flash: var(--flash);
+  --font-sans:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-serif:
+    ui-serif, "New York", "Iowan Old Style", "Charter", Georgia, serif;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
