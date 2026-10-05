@@ -58,20 +58,42 @@ The coverage minimums are Rust lines 90%, and frontend lines 90%,
 statements 90%, functions 85%, and branches 70%. The frontend thresholds
 live in `vite.config.ts`. `cargo-llvm-cov` comes from mise.
 
-## Checks before committing
+## Checks before pushing
 
-This is the sequence CI runs. Run it before considering a change done:
+One command runs everything CI runs, in the same way, and stops at the first
+failure:
 
 ```sh
-npm run build                                       # frontend build, needed by the Rust crate
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo llvm-cov --workspace --fail-under-lines 90    # Rust tests with coverage
-npm run check                                       # svelte-check with strict TypeScript
-npm run format:check                                # prettier
-npm run coverage                                    # frontend tests with coverage
-actionlint                                          # GitHub workflow files
+npm run verify        # or: mise run verify, or: scripts/verify.sh
 ```
+
+CI calls the same script (`scripts/verify.sh`), so a local pass means the CI
+checks pass. Fast checks run first so simple mistakes fail within seconds:
+
+1. Rust formatting (`cargo fmt --all --check`)
+2. Frontend formatting (`npm run format:check`)
+3. Workflow files (`actionlint`)
+4. Frontend build (`npm run build`, needed by the Rust crate)
+5. Type check (`npm run check`)
+6. Clippy (`cargo clippy --workspace --all-targets -- -D warnings`)
+7. Frontend tests with coverage (`npm run coverage`)
+8. Rust tests with coverage (`cargo llvm-cov --workspace --fail-under-lines 90`)
+
+When a step fails, the script names it and prints the command to rerun
+just that step. To fix formatting failures automatically, run
+`cargo fmt --all` and `npm run format`.
+
+### Run it automatically before every push
+
+The repository includes a pre-push hook that runs the same script. Enable it
+once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+A failing check then cancels the push. To push anyway, for example a
+work-in-progress branch, use `git push --no-verify`.
 
 A desktop build confirms packaging still works:
 

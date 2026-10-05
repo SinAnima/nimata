@@ -12,6 +12,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
+    "verify": "scripts/verify.sh",
     "tauri": "tauri"
   },
   "dependencies": {
