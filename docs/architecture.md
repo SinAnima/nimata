@@ -28,9 +28,12 @@ SQLite database in the app data folder (nimata.sqlite3)
 
 - **Persistence** sits behind the `Repository` trait in
   `nimata-core/src/repository.rs`. `SqliteRepository` is the only
-  implementation. The database is opened once at startup and held in Tauri
-  state behind a mutex. If it cannot be opened, the UI shows the reason
-  instead of the app crashing, and nothing is modified.
+  implementation. Rust owns the SQLite database on every platform; RxDB was
+  evaluated and not adopted (see
+  [ADR 0002](decisions/0002-persistence.md)). The database is opened once
+  at startup and held in Tauri state behind a mutex. If it cannot be
+  opened, the UI shows the reason and offers to restore a backup instead of
+  the app crashing, and the unusable file is never modified or deleted.
 
 Rust reads the clock for every write. A post's instant and UTC offset come
 from the same read of the device clock, so the UI cannot supply or alter
@@ -41,7 +44,9 @@ Drafts are saved shortly after typing pauses, and again when the window is
 hidden or closed. Posting removes the draft in the same transaction that
 inserts the post.
 
-See [data-model.md](data-model.md) for the schema.
+See [data-model.md](data-model.md) for the schema, deletion, backup, and
+restore, and [archive-format.md](archive-format.md) for the canonical JSON
+export.
 
 ## Domain model
 

@@ -21,6 +21,7 @@ function post(
     createdAt,
     tzOffsetMinutes: 0,
     editedAt: null,
+    deletedAt: null,
     status: "complete",
   };
 }

@@ -1,0 +1,13 @@
+{
+  "name": "nimata-rxdb-spike",
+  "private": true,
+  "description": "Throwaway experiments behind docs/decisions/0002-persistence.md. Not part of the app.",
+  "type": "module",
+  "scripts": {
+    "spike": "node spike.mjs"
+  },
+  "dependencies": {
+    "rxdb": "17.6.0",
+    "rxjs": "7.8.2"
+  }
+}

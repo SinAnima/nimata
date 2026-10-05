@@ -11,9 +11,19 @@ import type {
   Draft,
   Participant,
   Post,
+  Revision,
 } from "../lib/types";
 
 type Args = Record<string, unknown>;
+
+/** Everything a backup contains. */
+interface Snapshot {
+  me: Participant;
+  discussions: Discussion[];
+  posts: Post[];
+  drafts: [string, Draft][];
+  revisions: Revision[];
+}
 
 export class FakeBackend {
   me: Participant = {
@@ -26,7 +36,16 @@ export class FakeBackend {
   discussions: Discussion[] = [];
   posts: Post[] = [];
   drafts = new Map<string, Draft>();
+  revisions: Revision[] = [];
   calls: { cmd: string; args: Args }[] = [];
+  /** Backups written by backup_database, by path. */
+  backups = new Map<string, Snapshot>();
+  /** Files written by export_discussion, by path. */
+  exports = new Map<string, string>();
+  /** What the next file dialog returns: a path, or null for Cancel. */
+  dialogPath: string | null = "/backups/nimata-backup.sqlite3";
+  /** Set to make get/list fail as if the database could not be opened. */
+  openError: string | null = null;
   /** Commands that should fail on their next call, with the error to return. */
   failures = new Map<string, string>();
   now = Date.UTC(2026, 9, 4, 16, 0);
@@ -80,6 +99,32 @@ export class FakeBackend {
     if (!parent) throw "post being replied to not found";
     if (parent.discussionId !== discussionId)
       throw "a post can only reply to a post in the same discussion";
+    if (parent.deletedAt !== null) throw "a deleted post cannot be replied to";
+  }
+
+  #post(id: unknown): Post {
+    const post = this.posts.find((p) => p.id === id);
+    if (!post) throw "post not found";
+    return post;
+  }
+
+  #snapshot(): Snapshot {
+    return structuredClone({
+      me: this.me,
+      discussions: this.discussions,
+      posts: this.posts,
+      drafts: [...this.drafts],
+      revisions: this.revisions,
+    });
+  }
+
+  #load(snapshot: Snapshot): void {
+    const copy = structuredClone(snapshot);
+    this.me = copy.me;
+    this.discussions = copy.discussions;
+    this.posts = copy.posts;
+    this.drafts = new Map(copy.drafts);
+    this.revisions = copy.revisions;
   }
 
   #insertPost(
@@ -96,6 +141,7 @@ export class FakeBackend {
       createdAt: this.#tick(),
       tzOffsetMinutes: -240,
       editedAt: null,
+      deletedAt: null,
       status: "complete",
     };
     this.posts.push(post);
@@ -119,6 +165,10 @@ export class FakeBackend {
       this.failures.delete(cmd);
       throw failure;
     }
+    const databaseCommands = cmd !== "app_info" && !cmd.startsWith("plugin:");
+    if (this.openError && databaseCommands && cmd !== "database_status") {
+      if (cmd !== "restore_database") throw this.openError;
+    }
     switch (cmd) {
       case "local_user":
         return { ...this.me };
@@ -135,7 +185,9 @@ export class FakeBackend {
           )
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .map((d): DiscussionSummary => {
-            const posts = this.posts.filter((p) => p.discussionId === d.id);
+            const posts = this.posts.filter(
+              (p) => p.discussionId === d.id && p.deletedAt === null,
+            );
             return {
               id: d.id,
               title: d.title,
@@ -205,6 +257,67 @@ export class FakeBackend {
           updatedAt: this.now,
         });
         return null;
+      }
+      case "edit_post": {
+        const post = this.#post(args.postId);
+        if (post.deletedAt !== null) throw "a deleted post cannot be edited";
+        const body = this.#cleanBody(args.body);
+        if (body === post.body) return { ...post };
+        const at = this.#tick();
+        this.revisions.push({
+          postId: post.id,
+          body: post.body,
+          writtenAt: post.editedAt ?? post.createdAt,
+          replacedAt: at,
+        });
+        post.body = body;
+        post.editedAt = at;
+        return { ...post };
+      }
+      case "post_revisions":
+        this.#post(args.postId);
+        return this.revisions.filter((r) => r.postId === args.postId);
+      case "delete_post": {
+        const post = this.#post(args.postId);
+        if (post.deletedAt === null) {
+          post.body = "";
+          post.deletedAt = this.#tick();
+          this.revisions = this.revisions.filter((r) => r.postId !== post.id);
+          for (const draft of this.drafts.values()) {
+            if (draft.parentId === post.id) draft.parentId = null;
+          }
+        }
+        return { ...post };
+      }
+      case "delete_discussion": {
+        const d = this.#discussion(args.id);
+        this.discussions = this.discussions.filter((x) => x.id !== d.id);
+        this.posts = this.posts.filter((p) => p.discussionId !== d.id);
+        this.drafts.delete(d.id);
+        return null;
+      }
+      case "database_status":
+        return { path: "/data/nimata.sqlite3", error: this.openError };
+      case "export_discussion": {
+        const view = this.view(String(args.id));
+        if (this.dialogPath === null) return null;
+        this.exports.set(
+          this.dialogPath,
+          JSON.stringify({ format: "nimata/1", ...view }),
+        );
+        return this.dialogPath;
+      }
+      case "backup_database":
+        if (this.dialogPath === null) return null;
+        this.backups.set(this.dialogPath, this.#snapshot());
+        return this.dialogPath;
+      case "restore_database": {
+        if (this.dialogPath === null) return null;
+        const backup = this.backups.get(this.dialogPath);
+        if (!backup) throw `${this.dialogPath} is not a Nimata database`;
+        this.#load(backup);
+        this.openError = null;
+        return this.dialogPath;
       }
       case "app_info":
         return {

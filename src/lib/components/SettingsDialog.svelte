@@ -15,6 +15,10 @@
     info ??= await appInfo().catch(() => null);
   }
 
+  async function restore(): Promise<void> {
+    if (await notebook.restore()) dialog?.close();
+  }
+
   async function saveName(): Promise<void> {
     saved = await notebook.renameMe(name);
   }
@@ -56,6 +60,33 @@
         {saved ? "Saved." : "Shown as the author of your posts."}
       </p>
     </form>
+
+    <h3 class="mt-6 font-serif text-lg">Your data</h3>
+    <p class="mt-1 text-sm leading-relaxed text-muted">
+      A backup is a single file containing every discussion, post, and earlier
+      version. Keep it somewhere other than this device.
+    </p>
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button
+        type="button"
+        class="min-h-10 rounded border border-rule px-3 text-sm font-medium text-accent hover:bg-accent-soft"
+        onclick={() => notebook.backup()}
+      >
+        Back up…
+      </button>
+      <button
+        type="button"
+        class="min-h-10 rounded border border-rule px-3 text-sm hover:bg-accent-soft"
+        onclick={restore}
+      >
+        Restore from backup…
+      </button>
+    </div>
+    {#if notebook.status}
+      <p class="mt-2 text-sm break-all text-muted" role="status">
+        {notebook.status}
+      </p>
+    {/if}
 
     <h3 class="mt-6 font-serif text-lg">About Nimata</h3>
     <p class="mt-1 font-serif leading-relaxed">

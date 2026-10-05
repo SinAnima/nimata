@@ -1,96 +1,26 @@
 // Regression tests for whole user flows: the real App, stores, and api.ts
 // running against an in-memory backend through Tauri's IPC mock.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { screen, within } from "@testing-library/svelte";
-import { FakeBackend } from "./test/fakeBackend";
+import {
+  backend,
+  cleanup,
+  composer,
+  fireEvent,
+  fresh,
+  launch,
+  mount,
+  openDiscussion,
+  restart,
+  seed,
+  sidebar,
+  streamTexts,
+  waitFor,
+  writeAndPost,
+} from "./test/app";
 
-type TestingLibrary = typeof import("@testing-library/svelte");
-
-let backend: FakeBackend;
-/**
- * Testing Library loaded together with the current copy of the app. Each
- * launch resets the module registry, so rendering, events, and flushing must
- * come from the same Svelte runtime as the app.
- */
-let tl: TestingLibrary;
-
-/** Clears modules and loads a fresh app and Testing Library together. */
-async function freshModules() {
-  tl?.cleanup();
-  vi.resetModules();
-  tl = await import("@testing-library/svelte");
-}
-
-const fireEvent = new Proxy({} as TestingLibrary["fireEvent"], {
-  get: (_, key: keyof TestingLibrary["fireEvent"]) => tl.fireEvent[key],
-});
-const waitFor: TestingLibrary["waitFor"] = (...args) => tl.waitFor(...args);
-
-function fresh() {
-  backend = new FakeBackend().install();
-}
-
-/** Mounts a fresh copy of the app, as if Nimata had just been launched. */
-async function launch() {
-  await freshModules();
-  const { default: App } = await import("./App.svelte");
-  const { notebook } = await import("./lib/stores/notebook.svelte");
-  tl.render(App);
-  await waitFor(() => expect(notebook.me).not.toBeNull());
-  return notebook;
-}
-
-/** Closes the window the way the OS does, then launches the app again. */
-async function restart() {
-  window.dispatchEvent(new Event("pagehide"));
-  // The draft must be saved on close, not when the typing pause timer fires.
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(backend.calls.some((c) => c.cmd === "save_draft")).toBe(true);
-  return launch();
-}
-
-function seed(title: string, body: string) {
-  return backend.handle("start_discussion", { title, body }) as {
-    discussion: { id: string };
-    posts: { id: string }[];
-  };
-}
-
-function sidebar() {
-  return within(screen.getByRole("navigation", { name: "Discussions" }));
-}
-
-async function openDiscussion(title: string) {
-  await fireEvent.click(
-    await sidebar().findByRole("button", { name: new RegExp(title) }),
-  );
-  await screen.findByRole("list", { name: "Posts in order written" });
-}
-
-function composer() {
-  return screen.getByRole("textbox", {
-    name: "Post text",
-  }) as HTMLTextAreaElement;
-}
-
-async function writeAndPost(text: string) {
-  await fireEvent.input(composer(), { target: { value: text } });
-  await fireEvent.click(screen.getByRole("button", { name: "Post" }));
-  await screen.findByText(text, { selector: "article p" });
-}
-
-/** The body text of each post, top to bottom. */
-function streamTexts() {
-  const list = screen.getByRole("list", { name: "Posts in order written" });
-  return [...list.querySelectorAll("article")].map(
-    (article) => article.querySelector("div.font-serif p")?.textContent,
-  );
-}
-
-afterEach(() => {
-  tl?.cleanup();
-});
+afterEach(cleanup);
 
 describe("first run", () => {
   it("shows an empty notebook and starts a discussion with a derived title", async () => {
@@ -224,9 +154,7 @@ describe("failures", () => {
       "local_user",
       "cannot open /data/nimata.sqlite3: disk I/O error",
     );
-    await freshModules();
-    const { default: App } = await import("./App.svelte");
-    tl.render(App);
+    await mount();
     expect(
       await screen.findByText("Nimata cannot open your discussions"),
     ).toBeTruthy();

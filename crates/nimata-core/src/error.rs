@@ -13,6 +13,15 @@ pub enum Error {
     )]
     NewerSchema { found: i64, supported: i64 },
 
+    #[error("the database is damaged: {0}")]
+    Corrupt(String),
+
+    #[error("{0} is not a Nimata database")]
+    NotNimata(String),
+
+    #[error("file error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("storage error: {0}")]
     Storage(#[from] rusqlite::Error),
 }

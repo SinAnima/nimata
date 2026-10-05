@@ -4,12 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  DatabaseStatus,
   Discussion,
   DiscussionFilter,
   DiscussionSummary,
   DiscussionView,
   Participant,
   Post,
+  Revision,
   UnixMillis,
   Uuid,
 } from "./types";
@@ -67,6 +69,41 @@ export function saveDraft(
   body: string,
 ): Promise<void> {
   return invoke("save_draft", { discussionId, parentId, body });
+}
+
+export function editPost(postId: Uuid, body: string): Promise<Post> {
+  return invoke("edit_post", { postId, body });
+}
+
+export function postRevisions(postId: Uuid): Promise<Revision[]> {
+  return invoke("post_revisions", { postId });
+}
+
+export function deletePost(postId: Uuid): Promise<Post> {
+  return invoke("delete_post", { postId });
+}
+
+export function deleteDiscussion(id: Uuid): Promise<void> {
+  return invoke("delete_discussion", { id });
+}
+
+export function databaseStatus(): Promise<DatabaseStatus> {
+  return invoke("database_status");
+}
+
+/** Asks where to save; resolves to the saved path, or null if cancelled. */
+export function exportDiscussion(id: Uuid): Promise<string | null> {
+  return invoke("export_discussion", { id });
+}
+
+/** Asks where to save; resolves to the saved path, or null if cancelled. */
+export function backupDatabase(): Promise<string | null> {
+  return invoke("backup_database");
+}
+
+/** Asks for a backup file; resolves to its path, or null if cancelled. */
+export function restoreDatabase(): Promise<string | null> {
+  return invoke("restore_database");
 }
 
 export function onClockTick(

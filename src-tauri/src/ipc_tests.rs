@@ -130,3 +130,72 @@ fn unknown_ids_and_malformed_arguments_are_rejected() {
     let bad_filter = invoke(&w, "list_discussions", json!({ "filter": "everything" }));
     assert!(bad_filter.is_err());
 }
+
+#[test]
+fn edits_keep_history_and_deletes_leave_tombstones() {
+    let w = app();
+    let view = invoke(
+        &w,
+        "start_discussion",
+        json!({ "title": "T", "body": "first" }),
+    )
+    .unwrap();
+    let discussion_id = view["discussion"]["id"].clone();
+    let post_id = view["posts"][0]["id"].clone();
+
+    let edited = invoke(
+        &w,
+        "edit_post",
+        json!({ "postId": post_id, "body": "second" }),
+    )
+    .unwrap();
+    assert_eq!(edited["body"], "second");
+    assert!(edited["editedAt"].is_i64());
+
+    let revisions = invoke(&w, "post_revisions", json!({ "postId": post_id })).unwrap();
+    assert_eq!(revisions[0]["body"], "first");
+    assert!(revisions[0]["writtenAt"].is_i64());
+    assert!(revisions[0]["replacedAt"].is_i64());
+
+    let deleted = invoke(&w, "delete_post", json!({ "postId": post_id })).unwrap();
+    assert_eq!(deleted["body"], "");
+    assert!(deleted["deletedAt"].is_i64());
+
+    invoke(&w, "delete_discussion", json!({ "id": discussion_id })).unwrap();
+    let missing = invoke(&w, "get_discussion", json!({ "id": discussion_id }));
+    assert_eq!(missing.unwrap_err(), json!("discussion not found"));
+}
+
+#[test]
+fn database_status_reports_an_open_database() {
+    let w = app();
+    let status = invoke(&w, "database_status", json!({})).unwrap();
+    assert_eq!(status["error"], Value::Null);
+}
+
+#[test]
+fn exported_json_is_the_canonical_archive() {
+    use nimata_core::archive::DiscussionArchive;
+    use tauri::Manager;
+
+    let w = app();
+    let view = invoke(
+        &w,
+        "start_discussion",
+        json!({ "title": "T", "body": "first" }),
+    )
+    .unwrap();
+    let post_id = view["posts"][0]["id"].clone();
+    invoke(
+        &w,
+        "edit_post",
+        json!({ "postId": post_id, "body": "second" }),
+    )
+    .unwrap();
+
+    let id = uuid::Uuid::parse_str(view["discussion"]["id"].as_str().unwrap()).unwrap();
+    let json = crate::commands::discussion_json(&w.state::<AppState>(), id).unwrap();
+    let archive = DiscussionArchive::from_json(&json).unwrap();
+    assert_eq!(archive.posts[0].body, "second");
+    assert_eq!(archive.posts[0].revisions[0].body, "first");
+}
