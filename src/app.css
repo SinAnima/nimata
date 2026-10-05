@@ -42,34 +42,36 @@
     ui-serif, "New York", "Iowan Old Style", "Charter", Georgia, serif;
 }
 
-html,
-body,
-#app {
-  height: 100%;
-}
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
 
-body {
-  margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  overscroll-behavior: none;
-}
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overscroll-behavior: none;
+  }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 3px;
-}
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
 
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    transition-duration: 0s !important;
-    animation-duration: 0s !important;
-    scroll-behavior: auto !important;
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0s !important;
+      animation-duration: 0s !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

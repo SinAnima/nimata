@@ -15,8 +15,8 @@ Svelte UI (src/)
 Tauri shell (src-tauri/)
    │  plain Rust calls
 Nimata core (crates/nimata-core/)
-   │
-Local persistence (from Stage 1)
+   │  Repository trait
+SQLite database in the app data folder (nimata.sqlite3)
 ```
 
 - **nimata-core** holds the domain model and all discussion logic. It has
@@ -26,9 +26,22 @@ Local persistence (from Stage 1)
   calls, and platform concerns (paths, keychain, lifecycle) live here.
 - **The UI** talks to Rust only through `src/lib/api.ts`.
 
-Stage 0 serves fixture discussions from `nimata_core::fixtures` through
-the real command path. A `nimata://clock-tick` event from Rust keeps
-relative timestamps current.
+- **Persistence** sits behind the `Repository` trait in
+  `nimata-core/src/repository.rs`. `SqliteRepository` is the only
+  implementation. The database is opened once at startup and held in Tauri
+  state behind a mutex. If it cannot be opened, the UI shows the reason
+  instead of the app crashing, and nothing is modified.
+
+Rust reads the clock for every write. A post's instant and UTC offset come
+from the same read of the device clock, so the UI cannot supply or alter
+them. A `nimata://clock-tick` event from Rust keeps relative timestamps in
+the UI current.
+
+Drafts are saved shortly after typing pauses, and again when the window is
+hidden or closed. Posting removes the draft in the same transaction that
+inserts the post.
+
+See [data-model.md](data-model.md) for the schema.
 
 ## Domain model
 

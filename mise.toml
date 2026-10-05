@@ -4,10 +4,12 @@ java = "21"
 android-sdk = "latest"
 ruby = "3.4"
 cocoapods = "latest"
+"cargo:cargo-llvm-cov" = "latest"
+actionlint = "latest"
 
 [tools.rust]
 version = "1.97.1"
-components = "rustfmt,clippy"
+components = "rustfmt,clippy,llvm-tools"
 targets = "aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android"
 
 [env]
@@ -16,6 +18,10 @@ ANDROID_HOME = "{{env.HOME}}/Library/Android/sdk"
 # rejects two different SDK paths, so point both at the same SDK.
 ANDROID_SDK_ROOT = "{{env.HOME}}/Library/Android/sdk"
 NDK_HOME = "{{env.HOME}}/Library/Android/sdk/ndk/30.0.16248370"
+
+[tasks.verify]
+description = "Run every CI check locally, stopping at the first failure"
+run = "scripts/verify.sh"
 
 [settings]
 ruby.compile = false

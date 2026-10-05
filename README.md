@@ -17,10 +17,20 @@ The name comes from the Greek νήματα, "threads".
 
 ## Status
 
-Early development. The current build is an application shell with sample
-discussions: it shows how a threaded discussion reads as a chronological
-stream, on desktop and on phones. Posting, persistence, and model
-participants arrive in the next stages.
+Early development. Nimata works as a private threaded notebook: start
+discussions, reply to any post, rename and archive discussions, and keep
+unsent drafts. Everything is stored in a local SQLite database. Model
+participants arrive in a later stage.
+
+Keyboard shortcuts on desktop:
+
+| Keys      | Action                        |
+| --------- | ----------------------------- |
+| Cmd+N     | New discussion                |
+| Cmd+Enter | Post, or start the discussion |
+| J / K     | Next / previous post          |
+| R         | Reply to the focused post     |
+| Esc       | Cancel the reply target       |
 
 ## Principles
 

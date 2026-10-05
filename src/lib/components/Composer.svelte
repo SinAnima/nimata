@@ -1,26 +1,39 @@
 <script lang="ts">
-  import type { Participant, Post, Uuid } from "../types";
+  import type { Post, Uuid } from "../types";
   import { excerpt } from "../stream";
-  import { composers } from "../stores/composer.svelte";
+  import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
+  import { notebook } from "../stores/notebook.svelte";
 
   interface Props {
     discussionId: Uuid;
     postsById: Map<Uuid, Post>;
-    participants: Participant[];
     nameOf: (id: Uuid) => string;
+    onPosted: (post: Post) => void;
   }
 
-  let { discussionId, postsById, participants, nameOf }: Props = $props();
+  let { discussionId, postsById, nameOf, onPosted }: Props = $props();
 
-  const state = $derived(composers.get(discussionId));
+  const composers = notebook.composers;
+  const current = $derived(composers.get(discussionId));
   const target = $derived(
-    state.replyTo ? postsById.get(state.replyTo) : undefined,
+    current.replyTo ? postsById.get(current.replyTo) : undefined,
   );
-  const me = $derived(participants.find((p) => p.kind === "human"));
-  const models = $derived(participants.filter((p) => p.kind === "model"));
+  const canPost = $derived(current.draft.trim() !== "");
+  let posting = $state(false);
+
+  async function submit(): Promise<void> {
+    if (!canPost || posting) return;
+    posting = true;
+    const post = await notebook.post();
+    posting = false;
+    if (post) onPosted(post);
+  }
 
   function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape" && state.replyTo) {
+    if (isSubmitShortcut(event)) {
+      event.preventDefault();
+      void submit();
+    } else if (event.key === "Escape" && current.replyTo) {
       event.preventDefault();
       composers.setReplyTo(discussionId, null);
     }
@@ -30,9 +43,12 @@
 <form
   class="border-t border-rule bg-surface px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-8"
   aria-label="Compose a post"
-  onsubmit={(e) => e.preventDefault()}
+  onsubmit={(e) => {
+    e.preventDefault();
+    void submit();
+  }}
 >
-  <div class="flex items-center gap-3 text-sm text-muted">
+  <div class="flex min-h-7 items-center gap-3 text-sm text-muted">
     {#if target}
       <span class="min-w-0 truncate">
         Replying to
@@ -49,41 +65,30 @@
     {:else}
       <span>New thread</span>
     {/if}
-
-    <label class="ml-auto flex shrink-0 items-center gap-2">
-      <span class="sr-only">Author</span>
-      <select
-        class="rounded border border-rule bg-transparent px-2 py-1 text-ink disabled:opacity-60"
-        disabled
-      >
-        <option>Post as {me?.displayName ?? "me"}</option>
-        {#each models as model (model.id)}
-          <option>Ask {model.displayName}</option>
-        {/each}
-      </select>
-    </label>
+    <span class="ml-auto shrink-0 max-sm:hidden">
+      Posting as {notebook.me?.displayName ?? "you"}
+    </span>
   </div>
 
   <div class="mt-2 flex items-end gap-3">
     <label class="min-w-0 flex-1">
       <span class="sr-only">Post text</span>
       <textarea
-        rows="2"
-        class="block w-full resize-none rounded border border-rule bg-paper px-3 py-2 font-serif text-[1.0625rem] leading-normal placeholder:text-muted focus:border-accent focus:outline-none"
-        placeholder="Write a post"
-        value={state.draft}
+        data-composer
+        rows="3"
+        class="block max-h-[40vh] min-h-16 w-full resize-y rounded border border-rule bg-paper px-3 py-2 font-serif text-[1.0625rem] leading-normal placeholder:text-muted focus:border-accent focus:outline-none"
+        placeholder={target ? "Write a reply" : "Write a post"}
+        value={current.draft}
         oninput={(e) => composers.setDraft(discussionId, e.currentTarget.value)}
         onkeydown={onKeydown}></textarea>
     </label>
     <button
       type="submit"
       class="min-h-10 rounded bg-accent px-4 text-sm font-medium text-surface disabled:opacity-45"
-      disabled
+      disabled={!canPost || posting}
+      title="Post ({MODIFIER_LABEL}Enter)"
     >
       Post
     </button>
   </div>
-  <p class="mt-1.5 text-xs text-muted">
-    These are sample discussions. Posting is not available yet.
-  </p>
 </form>

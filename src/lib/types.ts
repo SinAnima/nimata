@@ -46,15 +46,25 @@ export interface DiscussionSummary {
   excerpt: string;
 }
 
+export interface Draft {
+  discussionId: Uuid;
+  parentId: Uuid | null;
+  body: string;
+  updatedAt: UnixMillis;
+}
+
 export interface DiscussionView {
   discussion: Discussion;
   posts: Post[];
   participants: Participant[];
+  draft: Draft | null;
 }
+
+export type DiscussionFilter = "active" | "archived";
 
 export interface AppInfo {
   version: string;
   tauriVersion: string;
-  dataDir: string | null;
+  databasePath: string | null;
   platform: string;
 }

@@ -18,3 +18,9 @@ nimata-core = { path = "../crates/nimata-core" }
 tauri = { version = "2", features = [] }
 serde.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json.workspace = true
+tauri = { version = "2", features = ["test"] }
+tempfile = "3.27.0"

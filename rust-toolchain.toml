@@ -1,14 +1,7 @@
 # Applies to every cargo invocation, including Xcode and Gradle build steps
-# that run outside the mise environment. Keep in sync with mise.toml.
+# that run outside the mise environment. Keep the channel in sync with
+# mise.toml. Mobile targets are installed through mise.toml rather than here,
+# so CI runners do not download them.
 [toolchain]
 channel = "1.97.1"
-components = ["rustfmt", "clippy"]
-targets = [
-  "aarch64-apple-darwin",
-  "aarch64-apple-ios",
-  "aarch64-apple-ios-sim",
-  "aarch64-linux-android",
-  "armv7-linux-androideabi",
-  "i686-linux-android",
-  "x86_64-linux-android",
-]
+components = ["rustfmt", "clippy", "llvm-tools"]

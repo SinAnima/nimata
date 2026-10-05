@@ -11,6 +11,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "verify": "scripts/verify.sh",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -22,6 +24,8 @@
     "@tauri-apps/cli": "^2.12.1",
     "@testing-library/svelte": "^5.4.2",
     "@tsconfig/svelte": "^5.0.8",
+    "@types/node": "^25.9.9",
+    "@vitest/coverage-v8": "^4.1.11",
     "jsdom": "^29.1.1",
     "prettier": "^3.9.9",
     "prettier-plugin-svelte": "^4.1.1",

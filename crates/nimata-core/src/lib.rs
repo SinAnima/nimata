@@ -1,9 +1,16 @@
 //! Nimata core: the domain model and discussion logic, independent of any UI.
 
 pub mod domain;
-pub mod fixtures;
+pub mod error;
+pub mod repository;
+pub mod sqlite;
 pub mod time;
 
 pub use domain::{
-    Discussion, DiscussionSummary, DiscussionView, Participant, ParticipantKind, Post, PostStatus,
+    Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Participant,
+    ParticipantKind, Post, PostStatus,
 };
+pub use error::{Error, Result};
+pub use repository::Repository;
+pub use sqlite::SqliteRepository;
+pub use time::{Timestamp, UnixMillis};
