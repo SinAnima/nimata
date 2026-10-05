@@ -2,8 +2,10 @@
 
 pub mod archive;
 pub mod attachments;
+pub mod context;
 pub mod domain;
 pub mod error;
+pub mod providers;
 pub mod repository;
 pub mod sqlite;
 pub mod time;

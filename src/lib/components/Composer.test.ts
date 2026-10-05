@@ -10,51 +10,63 @@ vi.mock("../api", () => ({
 const { default: Composer } = await import("./Composer.svelte");
 const { notebook } = await import("../stores/notebook.svelte");
 
-const parent: Post = {
-  id: "p1",
-  discussionId: "d1",
-  parentId: null,
-  authorId: "me",
-  body: "The attraction is replication.",
-  createdAt: 0,
-  tzOffsetMinutes: 0,
-  editedAt: null,
-  deletedAt: null,
-  status: "complete",
-};
+function post(id: string, body: string, createdAt: number): Post {
+  return {
+    id,
+    discussionId: "d1",
+    parentId: null,
+    authorId: "me",
+    body,
+    createdAt,
+    tzOffsetMinutes: 0,
+    editedAt: null,
+    deletedAt: null,
+    status: "complete",
+    providerMetadata: null,
+  };
+}
+
+const first = post("p1", "The attraction is replication.", 1);
+const latest = post("p2", "But mobile changes the constraints.", 2);
 
 function renderComposer() {
+  const posts = [first, latest];
   render(Composer, {
     discussionId: "d1",
-    postsById: new Map([[parent.id, parent]]),
+    posts,
+    postsById: new Map(posts.map((p) => [p.id, p])),
     nameOf: () => "Thanos",
     onPosted: vi.fn(),
   });
 }
 
 describe("Composer", () => {
-  it("shows the reply target and clears it with Escape", async () => {
-    notebook.composers.setReplyTo("d1", "p1");
+  it("replies to the latest post unless another is chosen", async () => {
+    notebook.composers.clear("d1");
     renderComposer();
-    expect(screen.getByText(/The attraction is replication/)).toBeTruthy();
+    expect(screen.getByText(/But mobile changes the constraints/)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Reply to latest" }),
+    ).toBeNull();
+
+    notebook.composers.setReplyTo("d1", "p1");
+    await screen.findByText(/The attraction is replication/);
 
     await fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
     expect(notebook.composers.get("d1").replyTo).toBeNull();
-    expect(screen.getByText("New thread")).toBeTruthy();
+    await screen.findByText(/But mobile changes the constraints/);
   });
 
   it("enables posting only when there is text", async () => {
     notebook.composers.clear("d1");
     renderComposer();
-    const post = screen.getByRole("button", { name: "Post" });
-    expect(post.hasAttribute("disabled")).toBe(true);
+    const button = screen.getByRole("button", { name: "Post" });
+    expect(button.hasAttribute("disabled")).toBe(true);
 
     await fireEvent.input(screen.getByRole("textbox"), {
-      target: { value: "But mobile changes the constraints." },
+      target: { value: "A reply" },
     });
-    expect(post.hasAttribute("disabled")).toBe(false);
-    expect(notebook.composers.get("d1").draft).toBe(
-      "But mobile changes the constraints.",
-    );
+    expect(button.hasAttribute("disabled")).toBe(false);
+    expect(notebook.composers.get("d1").draft).toBe("A reply");
   });
 });

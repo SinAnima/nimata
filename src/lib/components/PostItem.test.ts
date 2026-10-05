@@ -23,6 +23,7 @@ function post(id: string, body: string, parentId: string | null): Post {
     editedAt: null,
     deletedAt: null,
     status: "complete",
+    providerMetadata: null,
   };
 }
 
@@ -44,6 +45,8 @@ function renderReply(quoteParent: boolean, onShowParent = vi.fn()) {
     flashing: false,
     isReplyTarget: false,
     isMine: false,
+    canDelete: false,
+    askableModels: [],
     editing: false,
     onReply: vi.fn(),
     onShowParent,
@@ -51,6 +54,9 @@ function renderReply(quoteParent: boolean, onShowParent = vi.fn()) {
     onCancelEdit: vi.fn(),
     onSaveEdit: vi.fn(),
     onDelete: vi.fn(),
+    onAsk: vi.fn(),
+    onStop: vi.fn(),
+    onRetry: vi.fn(),
   });
   return onShowParent;
 }

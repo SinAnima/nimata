@@ -58,6 +58,128 @@ pub struct Post {
     /// thread keeps its shape; its body is erased.
     pub deleted_at: Option<UnixMillis>,
     pub status: PostStatus,
+    /// For posts written by a model: which provider and model version
+    /// answered, the provider's own IDs, and token usage. Subordinate
+    /// metadata, never part of Nimata's identity for the post.
+    #[serde(default)]
+    pub provider_metadata: Option<ProviderMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderMetadata {
+    pub provider: String,
+    /// The exact model version that answered, as reported by the provider.
+    pub model: Option<String>,
+    pub response_id: Option<String>,
+    pub request_id: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// Set when the reply stopped early, e.g. at the output token limit.
+    pub incomplete_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    #[serde(rename = "openai")]
+    OpenAi,
+    Anthropic,
+    #[serde(rename = "openai_compatible")]
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::OpenAiCompatible => "openai_compatible",
+        }
+    }
+}
+
+/// Non-secret settings for one provider connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    pub id: Uuid,
+    pub kind: ProviderKind,
+    pub display_name: String,
+    /// `None` means the provider's standard endpoint.
+    pub base_url: Option<String>,
+}
+
+/// A model that can be asked to reply, as listed in Settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelParticipant {
+    pub participant: Participant,
+    pub provider_id: Uuid,
+    pub enabled: bool,
+    /// Names the model can be mentioned by, without the `@`. Every model can
+    /// also be mentioned by [`automatic_alias`] of its display name.
+    pub aliases: Vec<String>,
+}
+
+pub const MAX_ALIAS_CHARS: usize = 32;
+
+/// Normalises an alias: lowercase, without a leading `@`. Letters, digits,
+/// `.`, `_`, and `-` are allowed; it must start with a letter or digit.
+pub fn clean_alias(alias: &str) -> Result<String> {
+    let alias = alias.trim().trim_start_matches('@').to_lowercase();
+    let valid_chars = alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let starts_well = alias.chars().next().is_some_and(char::is_alphanumeric);
+    if alias.is_empty() || alias.chars().count() > MAX_ALIAS_CHARS || !valid_chars || !starts_well {
+        return Err(Error::Invalid(format!(
+            "\"{alias}\" cannot be an alias: use up to {MAX_ALIAS_CHARS} letters, digits, dots, dashes, or underscores, starting with a letter or digit"
+        )));
+    }
+    Ok(alias)
+}
+
+/// The alias every model has without setting one: its display name in
+/// lowercase with only letters and digits, e.g. "GPT-6-sol" -> "gpt6sol".
+pub fn automatic_alias(display_name: &str) -> String {
+    display_name
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerationStatus {
+    Queued,
+    Sending,
+    Streaming,
+    Complete,
+    Failed,
+    Cancelled,
+}
+
+impl GenerationStatus {
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// The record of one request to a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Generation {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub participant_id: Uuid,
+    pub status: GenerationStatus,
+    pub error: Option<String>,
+    /// Exactly which posts were sent to the model, in order.
+    pub context_post_ids: Vec<Uuid>,
+    pub started_at: UnixMillis,
+    pub finished_at: Option<UnixMillis>,
 }
 
 impl Post {
@@ -202,6 +324,24 @@ mod tests {
     }
 
     #[test]
+    fn aliases_are_normalised_and_checked() {
+        assert_eq!(clean_alias(" @Review ").unwrap(), "review");
+        assert_eq!(clean_alias("gpt-6.sol_2").unwrap(), "gpt-6.sol_2");
+        for bad in [
+            "",
+            "@",
+            "two words",
+            "-dash",
+            "x".repeat(33).as_str(),
+            "re@view",
+        ] {
+            assert!(clean_alias(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(automatic_alias("GPT-6-sol"), "gpt6sol");
+        assert_eq!(automatic_alias("Claude Sonnet"), "claudesonnet");
+    }
+
+    #[test]
     fn post_serializes_in_camel_case_with_millis() {
         let post = Post {
             id: Uuid::nil(),
@@ -214,6 +354,7 @@ mod tests {
             edited_at: None,
             deleted_at: None,
             status: PostStatus::Complete,
+            provider_metadata: None,
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["createdAt"], 1_700_000_000_000_i64);

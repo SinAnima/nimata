@@ -153,13 +153,15 @@ sqlite3 -readonly ~/Library/Application\ Support/org.nimata.app/nimata.sqlite3
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every branch push and pull request, on
-Ubuntu: formatting, clippy, Rust tests with coverage, type checking,
-Prettier, and frontend tests with coverage. Coverage reports are attached to
-each run as an artifact named `coverage`.
+`.github/workflows/ci.yml` runs on Ubuntu for every pull request (again on
+each push to its branch) and for every push to `main`: formatting, clippy,
+Rust tests with coverage, type checking, Prettier, and frontend tests with
+coverage. Coverage reports are attached to each run as an artifact named
+`coverage`.
 
-Pushing a branch is therefore enough to test CI. To follow it from the
-terminal:
+A push to a branch without a pull request does not start CI; run
+`npm run verify` locally (the pre-push hook does this for you), or start CI
+by hand. To follow runs from the terminal:
 
 ```sh
 gh run list --branch "$(git branch --show-current)"

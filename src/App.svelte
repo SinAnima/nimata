@@ -14,6 +14,7 @@
 
   onMount(() => {
     const stopClock = startClock();
+    const stopReplies = notebook.listenForReplies();
     void notebook.init(matchMedia("(min-width: 48rem)").matches);
 
     // Save unsent drafts before the window is hidden or closed.
@@ -25,6 +26,7 @@
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pagehide", flush);
       void stopClock.then((stop) => stop());
+      void stopReplies.then((stop) => stop());
     };
   });
 

@@ -1,10 +1,16 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { Participant, Post, Revision } from "../types";
+  import type {
+    Generation,
+    ModelParticipant,
+    Participant,
+    Post,
+    Revision,
+  } from "../types";
   import { authorWallClock, friendlyTime, utcIso } from "../time";
   import { excerpt, paragraphs } from "../stream";
   import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
-  import { errorMessage, postRevisions } from "../api";
+  import { errorMessage, postRevisions, replyDetails } from "../api";
   import ParticipantMark from "./ParticipantMark.svelte";
 
   interface Props {
@@ -18,6 +24,10 @@
     isReplyTarget: boolean;
     /** Written by the person using this device, so it can be edited. */
     isMine: boolean;
+    /** Theirs, or a model's reply in their discussion. */
+    canDelete: boolean;
+    /** Models that can be asked to reply to this post. */
+    askableModels: ModelParticipant[];
     editing: boolean;
     onReply: () => void;
     onShowParent: () => void;
@@ -25,6 +35,9 @@
     onCancelEdit: () => void;
     onSaveEdit: (body: string) => Promise<boolean>;
     onDelete: () => void;
+    onAsk: (participantId: string) => void;
+    onStop: () => void;
+    onRetry: () => void;
   }
 
   let {
@@ -37,6 +50,8 @@
     flashing,
     isReplyTarget,
     isMine,
+    canDelete,
+    askableModels,
     editing,
     onReply,
     onShowParent,
@@ -44,6 +59,9 @@
     onCancelEdit,
     onSaveEdit,
     onDelete,
+    onAsk,
+    onStop,
+    onRetry,
   }: Props = $props();
 
   let showDetails = $state(false);
@@ -52,10 +70,36 @@
   let editText = $state("");
   let saving = $state(false);
   let editor: HTMLTextAreaElement | undefined = $state();
+  let askMenuOpen = $state(false);
+  /** How a model reply came about; loaded when it is needed. */
+  let generation: Generation | null = $state(null);
 
   const name = $derived(author?.displayName ?? "Unknown participant");
   const exact = $derived(authorWallClock(post.createdAt, post.tzOffsetMinutes));
   const deleted = $derived(post.deletedAt !== null);
+  const isModel = $derived(author?.kind === "model");
+  const complete = $derived(post.status === "complete");
+  const ended = $derived(
+    post.status === "failed" || post.status === "cancelled",
+  );
+
+  // Why a reply failed is kept with its request record.
+  $effect(() => {
+    if (post.status === "failed" && !deleted) void loadGeneration();
+  });
+
+  async function loadGeneration(): Promise<void> {
+    try {
+      generation = await replyDetails(post.id);
+    } catch {
+      generation = null;
+    }
+  }
+
+  function ask(participantId: string): void {
+    askMenuOpen = false;
+    onAsk(participantId);
+  }
   const fullTime = (at: number) =>
     new Date(at).toLocaleString(undefined, {
       dateStyle: "full",
@@ -71,6 +115,7 @@
 
   async function toggleDetails(): Promise<void> {
     showDetails = !showDetails;
+    if (showDetails && isModel) void loadGeneration();
     if (showDetails && post.editedAt !== null && !deleted) {
       try {
         revisions = await postRevisions(post.id);
@@ -118,7 +163,7 @@
     <ParticipantMark kind={author?.kind ?? "human"} />
     <span class="text-[0.9375rem] font-semibold">{name}</span>
     <span class="ml-auto"></span>
-    {#if !deleted && !editing}
+    {#if !deleted && !editing && complete}
       <button
         type="button"
         class="-my-2 min-h-9 rounded px-2 text-sm text-muted hover:text-accent"
@@ -127,6 +172,39 @@
       >
         Reply
       </button>
+      {#if askableModels.length === 1}
+        {@const model = askableModels[0]!}
+        <button
+          type="button"
+          class="-my-2 min-h-9 rounded px-2 text-sm text-muted hover:text-accent"
+          onclick={() => ask(model.participant.id)}
+        >
+          Ask {model.participant.displayName}
+        </button>
+      {:else if askableModels.length > 1}
+        <details class="relative" bind:open={askMenuOpen}>
+          <summary
+            class="-my-2 flex min-h-9 cursor-pointer list-none items-center rounded px-2 text-sm text-muted hover:text-accent [&::-webkit-details-marker]:hidden"
+          >
+            Ask…
+          </summary>
+          <div
+            class="absolute right-0 z-10 mt-1 w-52 rounded-md border border-rule bg-surface py-1 shadow-lg"
+            role="group"
+            aria-label="Ask a model to reply"
+          >
+            {#each askableModels as model (model.participant.id)}
+              <button
+                type="button"
+                class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
+                onclick={() => ask(model.participant.id)}
+              >
+                {model.participant.displayName}
+              </button>
+            {/each}
+          </div>
+        </details>
+      {/if}
       {#if isMine && post.status === "complete"}
         <button
           type="button"
@@ -174,6 +252,33 @@
       {#if author?.kind === "model"}
         <dt>Model</dt>
         <dd>{author.provider} / {author.model}</dd>
+        {#if post.providerMetadata?.model}
+          <dt>Answered by</dt>
+          <dd>{post.providerMetadata.model}</dd>
+        {/if}
+        {#if post.providerMetadata?.inputTokens != null}
+          <dt>Tokens</dt>
+          <dd class="tabular-nums">
+            {post.providerMetadata.inputTokens} sent, {post.providerMetadata
+              .outputTokens} received
+          </dd>
+        {/if}
+        {#if post.providerMetadata?.requestId}
+          <dt>Request ID</dt>
+          <dd class="break-all">{post.providerMetadata.requestId}</dd>
+        {/if}
+        {#if generation?.error}
+          <dt>Error</dt>
+          <dd>{generation.error}</dd>
+        {/if}
+        {#if generation}
+          <dt>Shown</dt>
+          <dd>
+            {generation.contextPostIds.length}
+            {generation.contextPostIds.length === 1 ? "post" : "posts"}: the
+            thread down to the post it replies to
+          </dd>
+        {/if}
       {/if}
     </dl>
 
@@ -201,7 +306,7 @@
       </section>
     {/if}
 
-    {#if isMine && !deleted}
+    {#if canDelete && !deleted && post.status !== "streaming"}
       <button
         type="button"
         class="mt-2 -ml-2 min-h-9 rounded px-2 text-sm text-muted hover:text-ink"
@@ -274,12 +379,54 @@
       This post was deleted.
     </p>
   {:else}
-    <div
-      class="mt-2 max-w-[68ch] space-y-3 font-serif text-[1.0625rem] leading-[1.6]"
-    >
-      {#each paragraphs(post.body) as paragraph, i (i)}
-        <p>{paragraph}</p>
-      {/each}
-    </div>
+    {#if post.body !== ""}
+      <div
+        class="mt-2 max-w-[68ch] space-y-3 font-serif text-[1.0625rem] leading-[1.6]"
+      >
+        {#each paragraphs(post.body) as paragraph, i (i)}
+          <p>{paragraph}</p>
+        {/each}
+      </div>
+    {/if}
+
+    {#if post.status === "streaming"}
+      <div class="mt-2 flex items-center gap-3 text-sm text-muted">
+        <span role="status">
+          {post.body === "" ? `Waiting for ${name}…` : "Writing…"}
+        </span>
+        <button
+          type="button"
+          class="min-h-9 rounded px-2 hover:text-ink"
+          onclick={onStop}
+        >
+          Stop
+        </button>
+      </div>
+    {:else if ended}
+      <div
+        class="mt-2 flex max-w-[68ch] flex-wrap items-baseline gap-x-3 gap-y-1 text-sm"
+      >
+        <p class="text-muted" role={post.status === "failed" ? "alert" : null}>
+          {#if post.status === "cancelled"}
+            Stopped before finishing.
+          {:else}
+            This reply failed{generation?.error ? `: ${generation.error}` : "."}
+          {/if}
+        </p>
+        <button
+          type="button"
+          class="min-h-9 rounded px-2 font-medium text-accent hover:bg-accent-soft"
+          onclick={onRetry}
+        >
+          Retry
+        </button>
+      </div>
+    {:else if post.providerMetadata?.incompleteReason}
+      <p class="mt-2 text-sm text-muted">
+        {post.providerMetadata.incompleteReason === "max_output_tokens"
+          ? "The reply stopped at its length limit."
+          : `The reply stopped early (${post.providerMetadata.incompleteReason}).`}
+      </p>
+    {/if}
   {/if}
 </article>

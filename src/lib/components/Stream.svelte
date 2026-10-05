@@ -138,6 +138,9 @@
             flashing={flashingId === post.id}
             isReplyTarget={replyTo === post.id}
             isMine={post.authorId === notebook.me?.id}
+            canDelete={post.authorId === notebook.me?.id ||
+              participantsById.get(post.authorId)?.kind === "model"}
+            askableModels={notebook.askableModels}
             editing={notebook.editingPostId === post.id}
             onReply={() => reply(post.id)}
             onShowParent={() => parent && showPost(parent.id)}
@@ -145,6 +148,9 @@
             onCancelEdit={() => (notebook.editingPostId = null)}
             onSaveEdit={(body) => notebook.editPost(post.id, body)}
             onDelete={() => notebook.deletePost(post.id)}
+            onAsk={(participantId) => notebook.askModel(post.id, participantId)}
+            onStop={() => notebook.cancelReply(post.id)}
+            onRetry={() => notebook.retryReply(post.id)}
           />
         </li>
       {/each}
@@ -153,6 +159,7 @@
 
   <Composer
     discussionId={view.discussion.id}
+    posts={view.posts}
     {postsById}
     {nameOf}
     onPosted={posted}

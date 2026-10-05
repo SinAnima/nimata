@@ -11,7 +11,7 @@ use chrono::{DateTime, FixedOffset, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{DiscussionView, ParticipantKind, PostStatus, Revision};
+use crate::domain::{DiscussionView, ParticipantKind, PostStatus, ProviderMetadata, Revision};
 use crate::error::{Error, Result};
 use crate::time::UnixMillis;
 
@@ -67,6 +67,10 @@ pub struct ArchivedPost {
     /// Earlier versions, oldest first.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub revisions: Vec<ArchivedRevision>,
+    /// For model replies: which provider and model version answered, the
+    /// provider's own IDs, and token usage.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_metadata: Option<ProviderMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +157,7 @@ impl DiscussionArchive {
                             replaced_at: format_utc(r.replaced_at),
                         })
                         .collect(),
+                    provider_metadata: p.provider_metadata.clone(),
                 })
                 .collect(),
         }
@@ -233,6 +238,7 @@ mod tests {
             edited_at: edited.map(UnixMillis),
             deleted_at: deleted.map(UnixMillis),
             status: PostStatus::Complete,
+            provider_metadata: None,
         };
         let root = post(
             None,

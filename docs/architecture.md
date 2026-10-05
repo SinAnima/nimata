@@ -35,6 +35,13 @@ SQLite database in the app data folder (nimata.sqlite3)
   opened, the UI shows the reason and offers to restore a backup instead of
   the app crashing, and the unusable file is never modified or deleted.
 
+Model replies are run by `src-tauri/src/generation.rs`: it builds the
+request from the thread (`nimata_core::context`), calls the provider
+adapter (`nimata_core::providers`), streams text into the reply post, and
+announces progress to the UI as `nimata://post-delta` and
+`nimata://post-updated` events. See [providers.md](providers.md) and
+[ADR 0003](decisions/0003-model-providers.md).
+
 Rust reads the clock for every write. A post's instant and UTC offset come
 from the same read of the device clock, so the UI cannot supply or alter
 them. A `nimata://clock-tick` event from Rust keeps relative timestamps in

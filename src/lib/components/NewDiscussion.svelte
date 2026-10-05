@@ -2,24 +2,43 @@
   import { onMount } from "svelte";
   import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
   import { notebook } from "../stores/notebook.svelte";
+  import { whoAnswers, type AskChoice } from "../compose";
+  import AskLine from "./AskLine.svelte";
 
   let { onCancel }: { onCancel: () => void } = $props();
 
   let title = $state("");
   let body = $state("");
   let starting = $state(false);
+  let choice: AskChoice = $state(null);
+  const answerers = $derived(
+    whoAnswers({
+      text: body,
+      choice,
+      target: undefined,
+      posts: [],
+      askable: notebook.askableModels,
+      defaultModelId: notebook.defaultModelId,
+    }),
+  );
   let bodyField: HTMLTextAreaElement | undefined = $state();
 
   onMount(() => bodyField?.focus());
 
   async function submit(): Promise<void> {
-    if (body.trim() === "" || starting) return;
+    if (
+      body.trim() === "" ||
+      starting ||
+      answerers.mentions.problems.length > 0
+    )
+      return;
     starting = true;
-    const started = await notebook.start(title, body);
+    const started = await notebook.start(title, body, answerers.models);
     starting = false;
     if (started) {
       title = "";
       body = "";
+      choice = null;
     }
   }
 
@@ -79,6 +98,7 @@
         bind:value={body}
         onkeydown={onKeydown}></textarea>
     </label>
+    <div class="max-w-3xl"><AskLine {answerers} bind:choice /></div>
     <div
       class="flex max-w-3xl items-center justify-end gap-3 pb-[env(safe-area-inset-bottom)]"
     >
@@ -92,7 +112,9 @@
       <button
         type="submit"
         class="min-h-10 rounded bg-accent px-4 text-sm font-medium text-surface disabled:opacity-45"
-        disabled={body.trim() === "" || starting}
+        disabled={body.trim() === "" ||
+          starting ||
+          answerers.mentions.problems.length > 0}
         title="Start discussion ({MODIFIER_LABEL}Enter)"
       >
         Start discussion

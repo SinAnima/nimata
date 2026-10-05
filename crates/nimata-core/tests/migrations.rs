@@ -140,3 +140,90 @@ fn reopening_an_upgraded_database_does_not_migrate_twice() {
         1
     );
 }
+
+#[test]
+fn a_version_2_database_upgrades_with_history_and_tombstones_intact() {
+    let dir = TempDir::new().unwrap();
+    let path = database_from("tests/fixtures/schema_v2.sql", &dir);
+    let mut repo = SqliteRepository::open(&path).unwrap();
+
+    let active = repo.list_discussions(DiscussionFilter::Active).unwrap();
+    assert_eq!(active.len(), 1, "the deleted discussion stays hidden");
+    assert_eq!(active[0].post_count, 2, "the deleted post is not counted");
+
+    let view = repo.get_discussion(active[0].id).unwrap();
+    assert_eq!(view.posts.len(), 3, "the tombstone keeps its place");
+    assert!(view.posts[1].deleted_at.is_some());
+    assert_eq!(view.posts[2].parent_id, Some(view.posts[1].id));
+    assert!(view.posts.iter().all(|p| p.provider_metadata.is_none()));
+
+    let revisions = repo.post_revisions(view.posts[0].id).unwrap();
+    assert_eq!(
+        revisions[0].body,
+        "Could Datalog replace the mapping engine?"
+    );
+
+    // Version 3 features work on the upgraded database.
+    let provider = repo
+        .standard_provider(nimata_core::domain::ProviderKind::OpenAi, UnixMillis(0))
+        .unwrap();
+    let model = repo
+        .set_model(provider.id, "gpt-5.6", "GPT-5.6", true)
+        .unwrap();
+    repo.begin_generation(
+        view.discussion.id,
+        view.posts[2].id,
+        model.participant.id,
+        &[view.posts[0].id, view.posts[2].id],
+        nimata_core::Timestamp {
+            at: UnixMillis(1_791_200_000_000),
+            offset_minutes: 0,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_version_3_database_upgrades_with_models_and_replies_intact() {
+    let dir = TempDir::new().unwrap();
+    let path = database_from("tests/fixtures/schema_v3.sql", &dir);
+    let mut repo = SqliteRepository::open(&path).unwrap();
+
+    let models = repo.model_participants().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].participant.display_name, "GPT-5.6");
+    assert!(
+        models[0].aliases.is_empty(),
+        "no aliases until some are set"
+    );
+
+    let reply = id("01a10993-0000-7000-8000-000000000002");
+    let generation = repo.generation_for_post(reply).unwrap().unwrap();
+    assert_eq!(
+        generation.context_post_ids,
+        vec![id("01a10993-0000-7000-8000-000000000001")]
+    );
+    let view = repo
+        .get_discussion(id("01a10992-0000-7000-8000-000000000001"))
+        .unwrap();
+    assert_eq!(
+        view.posts[1]
+            .provider_metadata
+            .as_ref()
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("gpt-5.6-2026-08-01")
+    );
+
+    // Version 4 features work on the upgraded database.
+    let gpt = models[0].participant.id;
+    assert_eq!(
+        repo.set_model_aliases(gpt, &["review".into()])
+            .unwrap()
+            .aliases,
+        vec!["review"]
+    );
+    repo.set_default_model(Some(gpt)).unwrap();
+    assert_eq!(repo.default_model().unwrap(), Some(gpt));
+}
