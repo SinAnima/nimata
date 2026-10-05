@@ -80,8 +80,19 @@ export interface ModelParticipant {
   aliases: string[];
 }
 
+/** What a kind of provider can do. */
+export interface Capabilities {
+  requiresKey: boolean;
+  customEndpoint: boolean;
+  multiple: boolean;
+  modelDiscovery: boolean;
+  streaming: boolean;
+  usage: boolean;
+}
+
 export interface ProviderView {
   provider: ProviderConfig;
+  capabilities: Capabilities;
   key: KeyStatus;
   models: ModelParticipant[];
 }

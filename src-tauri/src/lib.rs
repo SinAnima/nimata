@@ -39,6 +39,9 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::set_model_aliases,
         commands::default_model,
         commands::set_default_model,
+        commands::add_endpoint,
+        commands::update_endpoint,
+        commands::remove_endpoint,
     ])
 }
 

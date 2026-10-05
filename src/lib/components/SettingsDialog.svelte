@@ -4,6 +4,7 @@
   import type { AppInfo } from "../types";
   import { notebook } from "../stores/notebook.svelte";
   import ProviderSettings from "./ProviderSettings.svelte";
+  import AddEndpoint from "./AddEndpoint.svelte";
 
   type Tab = "general" | "models" | "data" | "about";
   const tabs: { id: Tab; label: string }[] = [
@@ -150,15 +151,15 @@
           </select>
         </label>
       {/if}
-      {#each notebook.providers as view (view.provider.id)}
+      {#each notebook.providers as view, i (view.provider.id)}
+        {#if i > 0}<hr class="my-6 border-rule" />{/if}
         <ProviderSettings {view} />
       {:else}
         <p class="text-sm text-muted">Loading…</p>
       {/each}
-      <p class="mt-6 text-sm text-muted">
-        Anthropic and OpenAI-compatible endpoints, including local models, come
-        in the next version.
-      </p>
+      <div class="mt-6">
+        <AddEndpoint />
+      </div>
     {:else if tab === "data"}
       <p class="text-sm leading-relaxed text-muted">
         A backup is a single file containing every discussion, post, and earlier

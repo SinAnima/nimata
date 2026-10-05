@@ -8,6 +8,7 @@ import type {
   KeyStatus,
   ModelInfo,
   ModelParticipant,
+  ProviderConfig,
   ProviderView,
   DatabaseStatus,
   Discussion,
@@ -158,6 +159,27 @@ export function retryReply(postId: Uuid): Promise<Post> {
 
 export function replyDetails(postId: Uuid): Promise<Generation | null> {
   return invoke("reply_details", { postId });
+}
+
+/** Adds an OpenAI-compatible connection, e.g. a local Ollama server. */
+export function addEndpoint(
+  displayName: string,
+  baseUrl: string,
+  key: string | null,
+): Promise<ProviderConfig> {
+  return invoke("add_endpoint", { displayName, baseUrl, key });
+}
+
+export function updateEndpoint(
+  providerId: Uuid,
+  displayName: string,
+  baseUrl: string,
+): Promise<ProviderConfig> {
+  return invoke("update_endpoint", { providerId, displayName, baseUrl });
+}
+
+export function removeEndpoint(providerId: Uuid): Promise<void> {
+  return invoke("remove_endpoint", { providerId });
 }
 
 export function setModelAliases(

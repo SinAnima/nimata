@@ -433,3 +433,112 @@ fn every_post_after_the_first_replies_to_something() {
         .add_post(s.discussion, Some(s.question), s.me, "A reply", at(3))
         .unwrap();
 }
+
+#[test]
+fn openai_compatible_connections_can_be_added_renamed_and_removed() {
+    let mut repo = SqliteRepository::open_in_memory().unwrap();
+    let openai = repo
+        .standard_provider(ProviderKind::OpenAi, UnixMillis(0))
+        .unwrap();
+    let anthropic = repo
+        .standard_provider(ProviderKind::Anthropic, UnixMillis(1))
+        .unwrap();
+    let ollama = repo
+        .add_provider(
+            ProviderKind::OpenAiCompatible,
+            "Ollama",
+            "http://localhost:11434/v1",
+            UnixMillis(2),
+        )
+        .unwrap();
+    let names: Vec<_> = repo
+        .providers()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.display_name)
+        .collect();
+    assert_eq!(names, vec!["OpenAI", "Anthropic", "Ollama"]);
+
+    assert!(
+        repo.add_provider(
+            ProviderKind::OpenAi,
+            "Second OpenAI",
+            "https://x/v1",
+            UnixMillis(3)
+        )
+        .is_err()
+    );
+    assert!(
+        repo.add_provider(
+            ProviderKind::OpenAiCompatible,
+            "No address",
+            "",
+            UnixMillis(3)
+        )
+        .is_err()
+    );
+    assert!(
+        repo.add_provider(
+            ProviderKind::OpenAiCompatible,
+            "Bad",
+            "localhost:1234",
+            UnixMillis(3)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        repo.providers().unwrap().len(),
+        3,
+        "failed additions leave nothing behind"
+    );
+
+    assert_eq!(
+        repo.rename_provider(ollama.id, "Ollama (laptop)", UnixMillis(4))
+            .unwrap()
+            .display_name,
+        "Ollama (laptop)"
+    );
+    assert!(matches!(
+        repo.remove_provider(openai.id),
+        Err(Error::Invalid(_))
+    ));
+    assert!(matches!(
+        repo.remove_provider(anthropic.id),
+        Err(Error::Invalid(_))
+    ));
+
+    let qwen = repo.set_model(ollama.id, "qwen3:8b", "Qwen", true).unwrap();
+    repo.set_default_model(Some(qwen.participant.id)).unwrap();
+    repo.remove_provider(ollama.id).unwrap();
+    assert_eq!(repo.providers().unwrap().len(), 2);
+    assert!(repo.model_participants().unwrap().is_empty());
+    assert_eq!(repo.default_model().unwrap(), None);
+}
+
+#[test]
+fn a_connection_whose_models_wrote_posts_cannot_be_removed() {
+    let mut s = setup();
+    let lm = s
+        .repo
+        .add_provider(
+            ProviderKind::OpenAiCompatible,
+            "LM Studio",
+            "http://localhost:1234/v1",
+            UnixMillis(0),
+        )
+        .unwrap();
+    let local = s
+        .repo
+        .set_model(lm.id, "llama", "Llama", true)
+        .unwrap()
+        .participant
+        .id;
+    s.repo
+        .begin_generation(s.discussion, s.question, local, &[], at(1))
+        .unwrap();
+    let error = s.repo.remove_provider(lm.id).unwrap_err();
+    assert!(
+        error.to_string().contains("turn its models off instead"),
+        "{error}"
+    );
+}

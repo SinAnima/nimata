@@ -103,6 +103,31 @@ pub trait Repository {
         at: UnixMillis,
     ) -> Result<ProviderConfig>;
 
+    /// Every provider: the standard ones first, then added connections in the
+    /// order they were added.
+    fn providers(&mut self) -> Result<Vec<ProviderConfig>>;
+
+    /// Adds a connection of a kind that allows several (OpenAI-compatible).
+    fn add_provider(
+        &mut self,
+        kind: ProviderKind,
+        display_name: &str,
+        base_url: &str,
+        at: UnixMillis,
+    ) -> Result<ProviderConfig>;
+
+    fn rename_provider(
+        &mut self,
+        id: Uuid,
+        display_name: &str,
+        at: UnixMillis,
+    ) -> Result<ProviderConfig>;
+
+    /// Removes an added connection whose models have written nothing. A
+    /// connection whose models wrote posts stays, so no post loses its
+    /// author; its models can be turned off instead.
+    fn remove_provider(&mut self, id: Uuid) -> Result<()>;
+
     /// Model participants, all providers, enabled or not, by display name.
     fn model_participants(&mut self) -> Result<Vec<ModelParticipant>>;
 

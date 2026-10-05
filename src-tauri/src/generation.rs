@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use nimata_core::context::build_request;
 use nimata_core::domain::{GenerationStatus, Post, ProviderConfig, ProviderKind, ProviderMetadata};
-use nimata_core::providers::openai::{DEFAULT_BASE_URL, OpenAi};
+use nimata_core::providers::anthropic::{self, Anthropic};
+use nimata_core::providers::openai::{self, OpenAi};
+use nimata_core::providers::openai_compatible::OpenAiCompatible;
 use nimata_core::providers::{
     Completion, HttpClient, ModelProvider, ModelRequest, ProviderError, StreamEvent, http_client,
 };
@@ -62,22 +64,46 @@ impl Generations {
         }
     }
 
+    /// The adapter for a provider. `key` may be `None` only for providers
+    /// that do not require one.
     pub fn provider_for(
         &self,
         config: &ProviderConfig,
-        key: String,
+        key: Option<String>,
     ) -> Result<Box<dyn ModelProvider>, String> {
-        match config.kind {
-            ProviderKind::OpenAi => Ok(Box::new(OpenAi::new(
-                self.client.clone(),
-                config.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL),
-                key,
-            ))),
-            other => Err(format!(
-                "{} replies arrive in a later version of Nimata",
-                other.as_str()
+        let missing = || {
+            format!(
+                "Add an {} API key in Settings, Models.",
+                config.display_name
+            )
+        };
+        let client = self.client.clone();
+        Ok(match config.kind {
+            ProviderKind::OpenAi => Box::new(OpenAi::new(
+                client,
+                config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(openai::DEFAULT_BASE_URL),
+                key.ok_or_else(missing)?,
             )),
-        }
+            ProviderKind::Anthropic => Box::new(Anthropic::new(
+                client,
+                config
+                    .base_url
+                    .as_deref()
+                    .unwrap_or(anthropic::DEFAULT_BASE_URL),
+                key.ok_or_else(missing)?,
+            )),
+            ProviderKind::OpenAiCompatible => Box::new(OpenAiCompatible::new(
+                client,
+                config.base_url.as_deref().ok_or(
+                    "this connection has no endpoint address; set one in Settings, Models",
+                )?,
+                key,
+                &config.display_name,
+            )),
+        })
     }
 }
 
@@ -112,12 +138,7 @@ pub fn ask<R: Runtime>(
             ));
         }
         let config = repo.provider(model.provider_id).map_err(text)?;
-        let Some((key, _)) = keys.resolve(&config)? else {
-            return Err(format!(
-                "Add an {} API key in Settings, Models.",
-                config.display_name
-            ));
-        };
+        let key = keys.resolve(&config)?.map(|(key, _)| key);
         let provider = generations.provider_for(&config, key)?;
         let provider_name = config.kind.as_str().to_string();
 

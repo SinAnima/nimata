@@ -3,11 +3,48 @@
   import type { ModelInfo, ProviderView } from "../types";
   import { notebook } from "../stores/notebook.svelte";
   import { automaticAlias } from "../mentions";
+  import { askToConfirm } from "../stores/confirmation.svelte";
 
   let { view }: { view: ProviderView } = $props();
 
   const provider = $derived(view.provider);
   const key = $derived(view.key);
+  const caps = $derived(view.capabilities);
+  const ready = $derived(!caps.requiresKey || key.source !== null);
+
+  let endpointName = $state("");
+  let endpointUrl = $state("");
+  let endpointError: string | null = $state(null);
+  $effect(() => {
+    endpointName = provider.displayName;
+    endpointUrl = provider.baseUrl ?? "";
+  });
+
+  async function saveEndpoint(): Promise<void> {
+    endpointError = null;
+    try {
+      await api.updateEndpoint(provider.id, endpointName, endpointUrl);
+      await notebook.loadProviders();
+    } catch (e) {
+      endpointError = api.errorMessage(e);
+    }
+  }
+
+  async function removeEndpoint(): Promise<void> {
+    const confirmed = await askToConfirm(
+      `Remove ${provider.displayName}?`,
+      "Its models and its saved key are removed from Nimata. Connections whose models have written posts stay; turn their models off instead.",
+      "Remove connection",
+    );
+    if (!confirmed) return;
+    endpointError = null;
+    try {
+      await api.removeEndpoint(provider.id);
+      await notebook.loadProviders();
+    } catch (e) {
+      endpointError = api.errorMessage(e);
+    }
+  }
 
   let keyInput = $state("");
   let replacing = $state(false);
@@ -28,8 +65,23 @@
     ),
   );
 
-  /** "gpt-5.6-mini" -> "GPT-5.6-mini", the way people write model names. */
+  /**
+   * A readable starting name for a model ID, e.g. "gpt-5.6-mini" ->
+   * "GPT-5.6-mini" and "claude-opus-5-5" -> "Claude Opus 5.5".
+   */
   function defaultName(id: string): string {
+    if (/^claude-/i.test(id)) {
+      return id
+        .split("-")
+        .reduce<string[]>((words, part) => {
+          const last = words.at(-1);
+          if (/^\d+$/.test(part) && last && /^[\d.]+$/.test(last))
+            words[words.length - 1] = `${last}.${part}`;
+          else words.push(part.charAt(0).toUpperCase() + part.slice(1));
+          return words;
+        }, [])
+        .join(" ");
+    }
     return id.replace(/^chatgpt/i, "ChatGPT").replace(/^gpt/i, "GPT");
   }
 
@@ -115,12 +167,49 @@
       {provider.displayName}
     </h3>
     <span class="text-sm text-muted">
-      {key.source ? "Key ready" : "No key yet"}
+      {#if !caps.requiresKey}
+        {key.source ? "Key saved" : "No key needed"}
+      {:else}
+        {key.source ? "Key ready" : "No key yet"}
+      {/if}
     </span>
   </div>
 
+  {#if caps.customEndpoint}
+    <form
+      class="grid gap-2 sm:grid-cols-[1fr_2fr]"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void saveEndpoint();
+      }}
+    >
+      <label class="text-sm">
+        <span class="text-muted">Name</span>
+        <input
+          class="mt-1 w-full rounded border border-rule bg-paper px-2 py-1.5 focus:border-accent focus:outline-none"
+          bind:value={endpointName}
+          onchange={saveEndpoint}
+        />
+      </label>
+      <label class="text-sm">
+        <span class="text-muted">Endpoint address</span>
+        <input
+          class="mt-1 w-full rounded border border-rule bg-paper px-2 py-1.5 font-mono text-xs focus:border-accent focus:outline-none"
+          spellcheck="false"
+          bind:value={endpointUrl}
+          onchange={saveEndpoint}
+        />
+      </label>
+    </form>
+    {#if endpointError}
+      <p class="text-sm" role="alert">{endpointError}</p>
+    {/if}
+  {/if}
+
   <div>
-    <h4 class="text-sm font-medium">API key</h4>
+    <h4 class="text-sm font-medium">
+      API key{caps.requiresKey ? "" : " (optional)"}
+    </h4>
     {#if key.source === "saved"}
       <p class="mt-1 text-sm text-muted">
         Saved in {key.store}{key.hint ? `, ending in ${key.hint}` : ""}.
@@ -131,6 +220,10 @@
           ? `, ending in ${key.hint}`
           : ""}. This happens only in development builds; save a key to use it
         everywhere.
+      </p>
+    {:else if !caps.requiresKey}
+      <p class="mt-1 text-sm text-muted">
+        Only needed if the server asks for one. It is saved in {key.store}.
       </p>
     {:else}
       <p class="mt-1 text-sm text-muted">
@@ -202,7 +295,7 @@
     {/if}
   </div>
 
-  {#if key.source}
+  {#if ready}
     <div>
       <button
         type="button"
@@ -332,4 +425,13 @@
       <p class="mt-1 text-sm" role="alert">{modelError}</p>
     {/if}
   </div>
+  {#if caps.customEndpoint}
+    <button
+      type="button"
+      class="min-h-10 rounded px-2 text-sm text-muted hover:text-ink"
+      onclick={removeEndpoint}
+    >
+      Remove connection
+    </button>
+  {/if}
 </section>

@@ -17,15 +17,17 @@ The name comes from the Greek νήματα, "threads".
 
 ## Status
 
-Early development. Nimata works as a threaded discussion client with
-OpenAI models as participants: start discussions, reply to any post, and
-every post you write is answered by a model (the one you are replying to,
-or whichever you @mention, using short aliases you choose), with the answer
-streaming in as an ordinary post that keeps its place in the thread. Edit posts while keeping
-their earlier versions, delete posts or discussions, rename and archive
+Early development. Nimata works as a threaded discussion client with AI
+models as participants: start discussions, reply to any post, and every post
+you write is answered by a model (the one you are replying to, or whichever
+you @mention, using short aliases you choose), with the answer streaming in
+as an ordinary post that keeps its place in the thread. Models from OpenAI,
+Anthropic, and any OpenAI-compatible server (including local ones such as
+Ollama) can take part in the same discussion. Edit posts while keeping their
+earlier versions, delete posts or discussions, rename and archive
 discussions, and keep unsent drafts. Everything is stored in a local SQLite
 database that you can back up and restore; API keys stay in the system
-keychain. Anthropic and OpenAI-compatible models come next.
+keychain.
 
 Keyboard shortcuts on desktop:
 

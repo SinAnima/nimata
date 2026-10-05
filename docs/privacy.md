@@ -9,7 +9,8 @@ device.
 - **Models see only what they are asked about.** When you ask a model to
   reply, only the thread down to that post is sent to its provider (see
   [providers.md](providers.md#what-a-model-is-sent)). OpenAI requests ask
-  OpenAI not to store the conversation.
+  OpenAI not to store the conversation. With an OpenAI-compatible
+  connection, the thread goes to the server you configured.
 - **Exports and backups are yours.** They are written only where you
   choose.
 
@@ -31,8 +32,11 @@ Nimata's files:
   Restoring a backup on another device means entering keys again.
 - **Release builds** show only "Saved in the Keychain".
 - **Development builds** also show the key's last four characters, and,
-  when no key is saved, use `OPENAI_API_KEY` from the environment (labelled
-  in Settings). A saved key always takes precedence.
+  when no key is saved, use `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` from
+  the environment (labelled in Settings). A saved key always takes
+  precedence. OpenAI-compatible connections never read the environment.
+- OpenAI-compatible connections may have no key at all; a local server
+  keeps the whole exchange on your machine.
 
 Unsigned development builds may see repeated macOS Keychain prompts after
 each rebuild, because macOS identifies the app by its code signature.

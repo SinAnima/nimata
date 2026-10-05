@@ -27,3 +27,16 @@ Status: accepted (Stage 3)
   startup are marked interrupted.
 - **Development conveniences** (key hints, `OPENAI_API_KEY`) are enabled by
   `cfg!(debug_assertions)` and absent from release builds.
+
+## Addendum (Stage 4)
+
+- Anthropic (Messages API) and OpenAI-compatible (Chat Completions)
+  adapters share one stream reader (`providers::sse_stream`) and one
+  HTTP-error mapping (`providers::status_error`); each adapter only parses
+  its own event format.
+- Each provider kind declares `Capabilities` (key required, custom
+  endpoint, several connections allowed, model discovery, streaming, usage)
+  so the UI offers only what applies.
+- OpenAI-compatible connections are user-added rows in `providers`. A
+  connection whose models wrote posts cannot be removed, so no post loses
+  its author.

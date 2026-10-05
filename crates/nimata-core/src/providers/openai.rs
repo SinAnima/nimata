@@ -5,15 +5,12 @@
 //! conversation on its side: the discussion stays Nimata's.
 
 use futures_util::future::BoxFuture;
-use futures_util::{StreamExt, stream};
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::sse::SseParser;
 use super::{
     Completion, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
-    ResponseStream, Role, StreamEvent, Usage,
+    ResponseStream, Role, StreamEvent, Usage, header, network_error, sse_stream, status_error,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -78,76 +75,11 @@ pub fn is_text_model(id: &str) -> bool {
     text_family && !not_text.iter().any(|word| id.contains(word))
 }
 
-#[derive(Deserialize)]
-struct ApiErrorBody {
-    error: Option<ApiError>,
-}
-
-#[derive(Deserialize)]
-struct ApiError {
-    message: Option<String>,
-    code: Option<String>,
-    #[serde(rename = "type")]
-    kind: Option<String>,
-}
+const PROVIDER: &str = "OpenAI";
 
 /// Turns an HTTP error from OpenAI into a message the user can act on.
 pub fn http_error(status: StatusCode, body: &str, model: Option<&str>) -> ProviderError {
-    let parsed = serde_json::from_str::<ApiErrorBody>(body)
-        .ok()
-        .and_then(|b| b.error);
-    let code = parsed
-        .as_ref()
-        .and_then(|e| e.code.clone().or_else(|| e.kind.clone()))
-        .unwrap_or_default();
-    let detail = parsed.and_then(|e| e.message);
-    let model = model.unwrap_or("this model");
-    let (kind, message) = match status.as_u16() {
-        401 => (
-            ProviderErrorKind::Auth,
-            "OpenAI rejected the API key. Check it in Settings, Models.".to_string(),
-        ),
-        403 => (
-            ProviderErrorKind::Auth,
-            format!("This API key is not allowed to use {model}."),
-        ),
-        404 => (
-            ProviderErrorKind::ModelUnavailable,
-            format!("The model {model} is not available to this API key."),
-        ),
-        429 if code == "insufficient_quota" => (
-            ProviderErrorKind::Quota,
-            "The OpenAI account has run out of credit or reached its spending limit.".to_string(),
-        ),
-        429 => (
-            ProviderErrorKind::RateLimit,
-            "OpenAI is limiting requests right now. Wait a moment, then retry.".to_string(),
-        ),
-        400..=499 => (
-            ProviderErrorKind::BadRequest,
-            "OpenAI could not accept this request.".to_string(),
-        ),
-        _ => (
-            ProviderErrorKind::Server,
-            "OpenAI had a server problem. Retry in a moment.".to_string(),
-        ),
-    };
-    ProviderError::new(kind, message).with_detail(detail)
-}
-
-fn network_error(error: reqwest::Error) -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::Network,
-        "Could not reach OpenAI. Check the internet connection, then retry.",
-    )
-    .with_detail(Some(error.to_string()))
-}
-
-fn interrupted() -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::Interrupted,
-        "The connection to OpenAI ended before the reply was finished.",
-    )
+    status_error(PROVIDER, status.as_u16(), body, model)
 }
 
 fn usage(response: &Value) -> Option<Usage> {
@@ -256,10 +188,13 @@ impl ModelProvider for OpenAi {
                 .bearer_auth(&self.api_key)
                 .send()
                 .await
-                .map_err(network_error)?;
+                .map_err(|e| network_error(PROVIDER, &e))?;
             let status = response.status();
-            let request_id = request_id(&response);
-            let body = response.text().await.map_err(network_error)?;
+            let request_id = header(&response, "x-request-id");
+            let body = response
+                .text()
+                .await
+                .map_err(|e| network_error(PROVIDER, &e))?;
             if !status.is_success() {
                 return Err(http_error(status, &body, None).with_request_id(request_id));
             }
@@ -296,9 +231,9 @@ impl ModelProvider for OpenAi {
                 .json(&Self::request_body(&request))
                 .send()
                 .await
-                .map_err(network_error)?;
+                .map_err(|e| network_error(PROVIDER, &e))?;
             let status = response.status();
-            let request_id = request_id(&response);
+            let request_id = header(&response, "x-request-id");
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(
@@ -306,64 +241,12 @@ impl ModelProvider for OpenAi {
                 );
             }
 
-            // Bytes -> SSE events -> Nimata events. If the stream ends without
-            // a final event, the reply was cut off.
-            let bytes = response.bytes_stream();
-            let events = stream::unfold(
-                (bytes, SseParser::new(), Vec::new(), false),
-                |(mut bytes, mut parser, mut pending, mut finished)| async move {
-                    loop {
-                        if let Some(event) = pending.pop() {
-                            if matches!(event, Ok(StreamEvent::Done(_)) | Err(_)) {
-                                finished = true;
-                            }
-                            return Some((event, (bytes, parser, pending, finished)));
-                        }
-                        if finished {
-                            return None;
-                        }
-                        match bytes.next().await {
-                            Some(Ok(chunk)) => {
-                                let mut parsed: Vec<_> = parser
-                                    .push(&chunk)
-                                    .iter()
-                                    .filter_map(|e| parse_event(&e.data))
-                                    .collect();
-                                parsed.reverse();
-                                pending = parsed;
-                            }
-                            Some(Err(e)) => {
-                                finished = true;
-                                return Some((
-                                    Err(network_error(e)),
-                                    (bytes, parser, pending, finished),
-                                ));
-                            }
-                            None => {
-                                finished = true;
-                                return Some((
-                                    Err(interrupted()),
-                                    (bytes, parser, pending, finished),
-                                ));
-                            }
-                        }
-                    }
-                },
-            );
-            Ok(ResponseStream {
-                request_id,
-                events: Box::pin(events),
-            })
+            let events = sse_stream(response, PROVIDER.to_string(), |event| {
+                parse_event(&event.data)
+            });
+            Ok(ResponseStream { request_id, events })
         })
     }
-}
-
-fn request_id(response: &reqwest::Response) -> Option<String> {
-    response
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -427,7 +310,7 @@ mod tests {
         assert_eq!(quota.kind, ProviderErrorKind::Quota);
         assert_eq!(
             quota.detail.as_deref(),
-            Some("You exceeded your current quota")
+            Some("You exceeded your current quota [insufficient_quota]")
         );
 
         let rate = http_error(StatusCode::TOO_MANY_REQUESTS, "{}", None);
@@ -436,12 +319,13 @@ mod tests {
         let auth = http_error(StatusCode::UNAUTHORIZED, "not json", None);
         assert_eq!(auth.kind, ProviderErrorKind::Auth);
         assert!(auth.message.contains("Settings"));
-        assert_eq!(auth.detail, None);
+        // A body that is not JSON is kept as the detail.
+        assert_eq!(auth.detail.as_deref(), Some("not json"));
 
         let missing = http_error(StatusCode::NOT_FOUND, "{}", Some("gpt-9"));
         assert_eq!(
             missing.message,
-            "The model gpt-9 is not available to this API key."
+            "The model gpt-9 is not available at OpenAI."
         );
 
         assert_eq!(
