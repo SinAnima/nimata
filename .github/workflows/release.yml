@@ -1,0 +1,108 @@
+name: Release
+
+# Builds installable desktop apps for a version tag and publishes them as a
+# GitHub Release. The release stays a draft until every build has uploaded,
+# so a partial release is never visible.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MISE_DISABLE_TOOLS: rust,java,android-sdk,ruby,cocoapods,cargo:cargo-llvm-cov,actionlint
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  prepare:
+    name: Check version and create draft release
+    needs: ci
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag must match the app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          npm_version="$(node -p 'require("./package.json").version')"
+          echo "tag=$tag Cargo.toml=$cargo_version package.json=$npm_version"
+          if [ "$tag" != "$cargo_version" ] || [ "$tag" != "$npm_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml ($cargo_version) and package.json ($npm_version)."
+            exit 1
+          fi
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "Nimata ${GITHUB_REF_NAME}" \
+            --generate-notes
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: macOS (Apple silicon and Intel)
+            os: macos-latest
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - name: Windows
+            os: windows-latest
+            rust_targets: ""
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: node
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          if [ -n "${{ matrix.rust_targets }}" ]; then
+            rustup target add ${{ matrix.rust_targets }}
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      - name: Build and upload
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npm run tauri
+          tagName: ${{ github.ref_name }}
+          releaseDraft: true
+          args: ${{ matrix.args }}
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

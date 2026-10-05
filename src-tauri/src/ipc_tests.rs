@@ -105,3 +105,28 @@ fn domain_errors_arrive_as_readable_messages() {
     .unwrap_err();
     assert_eq!(error, json!("a post cannot be empty"));
 }
+
+#[test]
+fn app_info_and_local_user_are_available() {
+    let w = app();
+    let info = invoke(&w, "app_info", json!({})).unwrap();
+    assert_eq!(info["tauriVersion"], tauri::VERSION);
+    assert!(info["version"].is_string());
+
+    let me = invoke(&w, "local_user", json!({})).unwrap();
+    assert_eq!(me["kind"], "human");
+    assert_eq!(invoke(&w, "local_user", json!({})).unwrap()["id"], me["id"]);
+}
+
+#[test]
+fn unknown_ids_and_malformed_arguments_are_rejected() {
+    let w = app();
+    let missing = invoke(&w, "get_discussion", json!({ "id": uuid::Uuid::now_v7() }));
+    assert_eq!(missing.unwrap_err(), json!("discussion not found"));
+
+    let bad_id = invoke(&w, "get_discussion", json!({ "id": "not-a-uuid" }));
+    assert!(bad_id.is_err());
+
+    let bad_filter = invoke(&w, "list_discussions", json!({ "filter": "everything" }));
+    assert!(bad_filter.is_err());
+}

@@ -472,3 +472,171 @@ fn post_from_row(row: &Row) -> rusqlite::Result<Post> {
         status: parse_status(&row.get::<_, String>(8)?)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    //! Behaviour that depends on SQLite details rather than the repository
+    //! contract: data written by something other than Nimata, and atomicity.
+
+    use super::*;
+
+    fn repo() -> SqliteRepository {
+        SqliteRepository::open_in_memory().unwrap()
+    }
+
+    fn at(minutes: i64) -> Timestamp {
+        Timestamp {
+            at: UnixMillis(1_791_132_067_123 + minutes * 60_000),
+            offset_minutes: 0,
+        }
+    }
+
+    #[test]
+    fn a_failed_first_post_leaves_no_discussion_behind() {
+        let mut repo = repo();
+        // The author does not exist, so the post insert violates a foreign
+        // key after the discussion row was written in the same transaction.
+        let result = repo.start_discussion("Orphan", Uuid::now_v7(), "body", at(0));
+        assert!(matches!(result, Err(Error::Storage(_))));
+        assert!(
+            repo.list_discussions(DiscussionFilter::Active)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failed_post_keeps_the_draft_and_activity_time() {
+        let mut repo = repo();
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo.start_discussion("D", me.id, "root", at(0)).unwrap();
+        repo.save_draft(d.id, Some(root.id), "keep me", UnixMillis(0))
+            .unwrap();
+
+        let result = repo.add_post(d.id, Some(root.id), Uuid::now_v7(), "x", at(5));
+        assert!(matches!(result, Err(Error::Storage(_))));
+
+        let view = repo.get_discussion(d.id).unwrap();
+        assert_eq!(view.posts.len(), 1);
+        assert_eq!(view.draft.unwrap().body, "keep me");
+        assert_eq!(view.discussion.updated_at, at(0).at);
+    }
+
+    #[test]
+    fn every_post_status_round_trips() {
+        let mut repo = repo();
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo.start_discussion("D", me.id, "root", at(0)).unwrap();
+        for status in ["streaming", "failed", "cancelled", "complete"] {
+            repo.conn
+                .execute(
+                    "UPDATE posts SET status = ?1 WHERE id = ?2",
+                    params![status, root.id.to_string()],
+                )
+                .unwrap();
+            let read = repo.get_discussion(d.id).unwrap().posts[0].status;
+            assert_eq!(status_str(read), status);
+        }
+    }
+
+    #[test]
+    fn model_and_agent_participants_are_read_back() {
+        let repo = repo();
+        for (kind, expected) in [
+            ("model", ParticipantKind::Model),
+            ("agent", ParticipantKind::Agent),
+        ] {
+            let id = Uuid::now_v7();
+            repo.conn
+                .execute(
+                    "INSERT INTO participants (id, kind, display_name, provider, model)
+                     VALUES (?1, ?2, 'P', 'openai', 'gpt')",
+                    params![id.to_string(), kind],
+                )
+                .unwrap();
+            let p = repo.participant(id).unwrap();
+            assert_eq!((p.kind, p.provider.as_deref()), (expected, Some("openai")));
+        }
+    }
+
+    #[test]
+    fn unexpected_stored_values_are_errors_not_panics() {
+        let mut repo = repo();
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo.start_discussion("D", me.id, "root", at(0)).unwrap();
+
+        // Bypass the CHECK constraint the way another tool might.
+        repo.conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")
+            .unwrap();
+        repo.conn
+            .execute(
+                "UPDATE posts SET status = 'sideways' WHERE id = ?1",
+                [root.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(repo.get_discussion(d.id), Err(Error::Storage(_))));
+
+        repo.conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        repo.conn
+            .execute(
+                "UPDATE posts SET status = 'complete', parent_id = 'not-a-uuid'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(repo.get_discussion(d.id), Err(Error::Storage(_))));
+
+        repo.conn
+            .execute("UPDATE participants SET kind = 'robot'", [])
+            .unwrap();
+        assert!(matches!(repo.local_user(), Err(Error::Storage(_))));
+    }
+
+    #[test]
+    fn missing_records_are_reported_as_not_found() {
+        let mut repo = repo();
+        let me = repo.local_user().unwrap();
+        let (d, _) = repo.start_discussion("D", me.id, "root", at(0)).unwrap();
+        let (_, other_root) = repo.start_discussion("E", me.id, "other", at(1)).unwrap();
+        let nobody = Uuid::now_v7();
+
+        assert!(matches!(
+            repo.rename_participant(nobody, "X"),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.set_archived(nobody, true, UnixMillis(0)),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.get_discussion(nobody),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.save_draft(nobody, None, "text", UnixMillis(0)),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.save_draft(d.id, Some(other_root.id), "text", UnixMillis(0)),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn error_messages_are_readable() {
+        assert_eq!(
+            Error::NotFound("discussion").to_string(),
+            "discussion not found"
+        );
+        assert_eq!(
+            Error::NewerSchema {
+                found: 3,
+                supported: 1
+            }
+            .to_string(),
+            "this database was created by a newer version of Nimata (schema 3, supported 1)"
+        );
+    }
+}

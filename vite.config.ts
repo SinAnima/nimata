@@ -21,7 +21,20 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    setupFiles: ["src/test/setup.ts"],
     include: ["src/**/*.test.ts"],
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,svelte}"],
+      exclude: [
+        "src/**/*.test.ts",
+        "src/test/**",
+        "src/main.ts",
+        "src/lib/types.ts",
+      ],
+      reporter: ["text-summary", "text", "lcov"],
+      thresholds: { lines: 90, statements: 90, functions: 85, branches: 70 },
+    },
   },
   resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
 });

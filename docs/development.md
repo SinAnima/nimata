@@ -49,6 +49,15 @@ npm test                 # vitest
 npm run tauri build -- --debug
 ```
 
+Coverage, with the same minimums CI enforces:
+
+```sh
+cargo llvm-cov --workspace --fail-under-lines 90   # Rust, needs cargo-llvm-cov from mise
+npm run coverage                                   # frontend, thresholds in vite.config.ts
+```
+
+`actionlint` (also from mise) checks the GitHub workflow files.
+
 Mobile build validation:
 
 ```sh
@@ -76,6 +85,13 @@ docs/                 architecture, decisions
   and schema version handling.
 - IPC tests (`src-tauri/src/ipc_tests.rs`) call commands through Tauri's
   mock runtime with the same JSON the UI sends.
+- Regression tests in `src/App.test.ts` mount the whole app and drive real
+  user flows: starting discussions, threaded replies, drafts surviving a
+  restart, renaming, archiving, keyboard shortcuts, settings, and failure
+  handling. They run the real `api.ts` against an in-memory backend
+  (`src/test/fakeBackend.ts`) through Tauri's IPC mock. The fake follows the
+  repository's rules; the Rust IPC tests hold the real commands to the same
+  JSON shapes.
 - Vitest covers stream ordering, reply references, time formatting,
   navigation, draft saving, keyboard navigation, and the composer, with
   components rendered in jsdom.
@@ -91,3 +107,10 @@ the app shows the exact path. To look without risking changes:
 ```sh
 sqlite3 -readonly ~/Library/Application\ Support/org.nimata.app/nimata.sqlite3
 ```
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request on Ubuntu:
+formatting, clippy, Rust tests with coverage, type checking, Prettier, and
+frontend tests with coverage. Coverage reports are uploaded as a build
+artifact. Releases are described in [release.md](release.md).
