@@ -1,8 +1,13 @@
 name: CI
 
+# Pull requests are checked on every push to their branch; main is checked
+# after each merge. A push to a branch with an open pull request would match
+# both triggers, so push is limited to main to avoid running CI twice.
+# Branches without a pull request: run `npm run verify` locally, or start CI
+# by hand with `gh workflow run CI --ref <branch>`.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
