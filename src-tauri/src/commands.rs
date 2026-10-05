@@ -4,15 +4,19 @@
 use std::path::PathBuf;
 
 use nimata_core::archive::DiscussionArchive;
+use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
+use nimata_core::providers::ModelInfo;
 use nimata_core::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Participant, Post, Repository,
     Revision, Timestamp, UnixMillis,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
+use crate::generation::{self, Generations};
+use crate::secrets::{KeyStatus, Keys};
 use crate::state::{AppState, DatabaseStatus};
 
 type CommandResult<T> = Result<T, String>;
@@ -290,4 +294,166 @@ mod tests {
         assert_eq!(file_name_from("???"), "discussion");
         assert_eq!(file_name_from("νήματα: threads"), "νήματα threads");
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderView {
+    provider: ProviderConfig,
+    key: KeyStatus,
+    models: Vec<ModelParticipant>,
+}
+
+/// Every provider with its key status and models. The standard OpenAI
+/// provider always exists.
+#[tauri::command]
+pub fn providers(
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+) -> CommandResult<Vec<ProviderView>> {
+    let mut repo = state.repo()?;
+    let openai = repo
+        .standard_provider(ProviderKind::OpenAi, UnixMillis::now())
+        .map_err(text)?;
+    let models = repo.model_participants().map_err(text)?;
+    Ok(vec![ProviderView {
+        key: keys.status(&openai)?,
+        models: models
+            .into_iter()
+            .filter(|m| m.provider_id == openai.id)
+            .collect(),
+        provider: openai,
+    }])
+}
+
+fn provider_config(state: &AppState, id: Uuid) -> CommandResult<ProviderConfig> {
+    state.repo()?.provider(id).map_err(text)
+}
+
+#[tauri::command]
+pub fn save_api_key(
+    provider_id: Uuid,
+    key: String,
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+) -> CommandResult<KeyStatus> {
+    keys.save(&provider_config(&state, provider_id)?, &key)
+}
+
+#[tauri::command]
+pub fn remove_api_key(
+    provider_id: Uuid,
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+) -> CommandResult<KeyStatus> {
+    keys.remove(&provider_config(&state, provider_id)?)
+}
+
+/// Lists the provider's text models, which also proves the key works.
+#[tauri::command]
+pub async fn provider_models(
+    provider_id: Uuid,
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+    generations: State<'_, Generations>,
+) -> CommandResult<Vec<ModelInfo>> {
+    let config = provider_config(&state, provider_id)?;
+    let Some((key, _)) = keys.resolve(&config)? else {
+        return Err(format!("Add an {} API key first.", config.display_name));
+    };
+    let provider = generations.provider_for(&config, key)?;
+    provider.models().await.map_err(text)
+}
+
+#[tauri::command]
+pub fn set_model(
+    provider_id: Uuid,
+    model: String,
+    display_name: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> CommandResult<ModelParticipant> {
+    state
+        .repo()?
+        .set_model(provider_id, &model, &display_name, enabled)
+        .map_err(text)
+}
+
+/// Asks a model to reply to a post. The reply streams in afterwards.
+#[tauri::command]
+pub fn ask_model<R: Runtime>(
+    discussion_id: Uuid,
+    parent_id: Uuid,
+    participant_id: Uuid,
+    app: AppHandle<R>,
+) -> CommandResult<Post> {
+    generation::ask(&app, discussion_id, parent_id, participant_id)
+}
+
+#[tauri::command]
+pub fn cancel_reply(post_id: Uuid, generations: State<'_, Generations>) -> bool {
+    generations.cancel(post_id)
+}
+
+/// Asks the same model again, as a new reply to the same post. The failed
+/// or stopped reply stays where it is.
+#[tauri::command]
+pub fn retry_reply<R: Runtime>(post_id: Uuid, app: AppHandle<R>) -> CommandResult<Post> {
+    let state = app.state::<AppState>();
+    let (discussion_id, parent_id, participant_id) = {
+        let mut repo = state.repo()?;
+        let generation = repo
+            .generation_for_post(post_id)
+            .map_err(text)?
+            .ok_or("only a model's reply can be retried")?;
+        if !generation.status.is_finished() {
+            return Err("this reply is still being written".into());
+        }
+        let post = repo.discussion_of_post(post_id).map_err(text)?;
+        (
+            post.0,
+            post.1.ok_or("this reply has no post to answer")?,
+            generation.participant_id,
+        )
+    };
+    generation::ask(&app, discussion_id, parent_id, participant_id)
+}
+
+/// How a model reply came about: its status, error, and which posts it was
+/// shown.
+#[tauri::command]
+pub fn reply_details(
+    post_id: Uuid,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<Generation>> {
+    state.repo()?.generation_for_post(post_id).map_err(text)
+}
+
+#[tauri::command]
+pub fn set_model_aliases(
+    participant_id: Uuid,
+    aliases: Vec<String>,
+    state: State<'_, AppState>,
+) -> CommandResult<ModelParticipant> {
+    state
+        .repo()?
+        .set_model_aliases(participant_id, &aliases)
+        .map_err(text)
+}
+
+/// The model that answers when neither a mention nor the thread decides.
+#[tauri::command]
+pub fn default_model(state: State<'_, AppState>) -> CommandResult<Option<Uuid>> {
+    state.repo()?.default_model().map_err(text)
+}
+
+#[tauri::command]
+pub fn set_default_model(
+    participant_id: Option<Uuid>,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .repo()?
+        .set_default_model(participant_id)
+        .map_err(text)
 }

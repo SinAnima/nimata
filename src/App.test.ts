@@ -105,7 +105,10 @@ describe("threaded replies", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Reply to Me" }));
     await writeAndPost("Answer");
     expect(composer().value).toBe("");
-    expect(screen.getByText("New thread")).toBeTruthy();
+    // The next post replies to the newest one.
+    expect(
+      screen.getByText(/Replying to/, { selector: "form span" }).textContent,
+    ).toContain("Answer");
   });
 });
 
@@ -121,7 +124,9 @@ describe("persistence across restarts", () => {
     await restart();
     await openDiscussion("Should Nimata use CouchDB");
     expect(composer().value).toBe("Half a thought");
-    expect(screen.getByRole("button", { name: "Cancel reply" })).toBeTruthy();
+    expect(
+      screen.getByText(/Replying to/, { selector: "form span" }).textContent,
+    ).toContain("Should Nimata use CouchDB?");
     expect(backend.drafts.get(backend.discussions[0]!.id)?.parentId).toBe(
       posts[0]!.id,
     );
@@ -293,10 +298,10 @@ describe("settings", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await screen.findByText("Saved.");
-    expect(screen.getByText("Posting as Thanos")).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Reply to Thanos" }),
     ).toBeTruthy();
+    await fireEvent.click(screen.getByRole("tab", { name: "About" }));
     expect(await screen.findByText("/data/nimata.sqlite3")).toBeTruthy();
   });
 });

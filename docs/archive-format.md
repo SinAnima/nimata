@@ -78,17 +78,18 @@ Files are named `<title>.nimata.json`.
 
 ### `posts[]`
 
-| Field       | Meaning                                                        |
-| ----------- | -------------------------------------------------------------- |
-| `id`        | UUID of the post.                                              |
-| `parentId`  | The post this one replies to, or `null` for a new thread.      |
-| `authorId`  | A participant `id`.                                            |
-| `createdAt` | When it was written, in the author's own UTC offset.           |
-| `status`    | `complete`; model replies can also be `failed` or `cancelled`. |
-| `body`      | The current text. Empty for a deleted post.                    |
-| `editedAt`  | When the text was last changed, UTC. Omitted if never edited.  |
-| `deletedAt` | When the post was deleted, UTC. Omitted unless deleted.        |
-| `revisions` | Earlier versions, oldest first. Omitted when there are none.   |
+| Field              | Meaning                                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`               | UUID of the post.                                                                                                                                        |
+| `parentId`         | The post this one replies to, or `null` for a new thread.                                                                                                |
+| `authorId`         | A participant `id`.                                                                                                                                      |
+| `createdAt`        | When it was written, in the author's own UTC offset.                                                                                                     |
+| `status`           | `complete`; model replies can also be `failed` or `cancelled`.                                                                                           |
+| `body`             | The current text. Empty for a deleted post.                                                                                                              |
+| `editedAt`         | When the text was last changed, UTC. Omitted if never edited.                                                                                            |
+| `deletedAt`        | When the post was deleted, UTC. Omitted unless deleted.                                                                                                  |
+| `revisions`        | Earlier versions, oldest first. Omitted when there are none.                                                                                             |
+| `providerMetadata` | For model replies: `provider`, `model` (exact version), `responseId`, `requestId`, `inputTokens`, `outputTokens`, `incompleteReason`. Omitted otherwise. |
 
 A deleted post stays in the file with an empty body so that replies to it
 still have a parent. Its revisions are erased when it is deleted.

@@ -3,8 +3,10 @@ import type {
   DiscussionFilter,
   DiscussionSummary,
   DiscussionView,
+  ModelParticipant,
   Participant,
   Post,
+  ProviderView,
   Uuid,
 } from "../types";
 import { Composers } from "./composer.svelte";
@@ -25,6 +27,25 @@ class Notebook {
   status: string | null = $state(null);
   /** The post being edited in place, if any. */
   editingPostId: Uuid | null = $state(null);
+  /** Providers with their key status and models, as shown in Settings. */
+  providers: ProviderView[] = $state([]);
+  /** The model that answers when neither a mention nor the thread decides. */
+  defaultModelId: Uuid | null = $state(null);
+
+  /** Every model participant, enabled or not. */
+  get models(): ModelParticipant[] {
+    return this.providers.flatMap((p) => p.models);
+  }
+
+  /** Models that can be asked to reply right now. */
+  get askableModels(): ModelParticipant[] {
+    const withKey = new Set(
+      this.providers
+        .filter((p) => p.key.source !== null)
+        .map((p) => p.provider.id),
+    );
+    return this.models.filter((m) => m.enabled && withKey.has(m.providerId));
+  }
 
   composers = new Composers(api.saveDraft, (e) => this.report(e));
 
@@ -40,8 +61,86 @@ class Notebook {
       this.fatal = api.errorMessage(e);
       return;
     }
+    await this.loadProviders();
     const first = this.discussions[0];
     if (wide && first) await this.open(first.id);
+  }
+
+  async loadProviders(): Promise<void> {
+    try {
+      this.providers = await api.providers();
+      this.defaultModelId = await api.defaultModel();
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  /**
+   * Keeps the open discussion in step with replies being written. Returns a
+   * function that stops listening.
+   */
+  async listenForReplies(): Promise<() => void> {
+    const stopDeltas = await api.onPostDelta(({ postId, text }) => {
+      const post = this.view?.posts.find((p) => p.id === postId);
+      if (post) post.body += text;
+    });
+    const stopUpdates = await api.onPostUpdated((post) => {
+      this.#showPost(post);
+      if (post.status !== "streaming") void this.refreshList().catch(() => {});
+    });
+    return () => {
+      stopDeltas();
+      stopUpdates();
+    };
+  }
+
+  /** Adds or replaces a post in the open discussion, if it belongs there. */
+  #showPost(post: Post): void {
+    const view = this.view;
+    if (!view || view.discussion.id !== post.discussionId) return;
+    const index = view.posts.findIndex((p) => p.id === post.id);
+    if (index >= 0) view.posts[index] = post;
+    else view.posts.push(post);
+    if (!view.participants.some((p) => p.id === post.authorId)) {
+      const model = this.models.find((m) => m.participant.id === post.authorId);
+      if (model) view.participants.push(model.participant);
+    }
+  }
+
+  async askModel(parentId: Uuid, participantId: Uuid): Promise<Post | null> {
+    const view = this.view;
+    if (!view) return null;
+    try {
+      const post = await api.askModel(
+        view.discussion.id,
+        parentId,
+        participantId,
+      );
+      this.#showPost(post);
+      return post;
+    } catch (e) {
+      this.report(e);
+      return null;
+    }
+  }
+
+  async cancelReply(postId: Uuid): Promise<void> {
+    try {
+      await api.cancelReply(postId);
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  async retryReply(postId: Uuid): Promise<Post | null> {
+    try {
+      const post = await api.retryReply(postId);
+      this.#showPost(post);
+      return post;
+    } catch (e) {
+      this.report(e);
+      return null;
+    }
   }
 
   async refreshList(): Promise<void> {
@@ -65,13 +164,22 @@ class Notebook {
     }
   }
 
-  async start(title: string, body: string): Promise<boolean> {
+  /** Starts a discussion, then asks `ask` to answer its first post. */
+  async start(
+    title: string,
+    body: string,
+    ask: ModelParticipant[] = [],
+  ): Promise<boolean> {
     try {
       const view = await api.startDiscussion(title, body);
       this.view = view;
       nav.open(view.discussion.id);
       this.filter = "active";
       await this.refreshList();
+      const first = view.posts[0];
+      for (const model of first ? ask : []) {
+        await this.askModel(first!.id, model.participant.id);
+      }
       return true;
     } catch (e) {
       this.report(e);
@@ -79,14 +187,20 @@ class Notebook {
     }
   }
 
-  /** Posts the composer's draft as the local user. */
-  async post(): Promise<Post | null> {
+  /**
+   * Posts the composer's draft as a reply to `parentId`, then asks each of
+   * `ask` to answer it.
+   */
+  async post(
+    parentId: Uuid,
+    ask: ModelParticipant[] = [],
+  ): Promise<Post | null> {
     const view = this.view;
     if (!view || !this.me) return null;
     const id = view.discussion.id;
-    const { replyTo, draft } = this.composers.get(id);
+    const { draft } = this.composers.get(id);
     try {
-      const post = await api.addPost(id, replyTo, draft);
+      const post = await api.addPost(id, parentId, draft);
       this.composers.clear(id);
       if (this.view?.discussion.id === id) {
         this.view.posts.push(post);
@@ -95,6 +209,9 @@ class Notebook {
         }
       }
       await this.refreshList();
+      for (const model of ask) {
+        await this.askModel(post.id, model.participant.id);
+      }
       return post;
     } catch (e) {
       this.report(e);

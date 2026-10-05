@@ -23,6 +23,7 @@ function post(
     editedAt: null,
     deletedAt: null,
     status: "complete",
+    providerMetadata: null,
   };
 }
 

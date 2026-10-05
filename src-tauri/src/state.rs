@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use nimata_core::archive::format_utc;
-use nimata_core::{SqliteRepository, UnixMillis};
+use nimata_core::{Repository, SqliteRepository, UnixMillis};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -77,13 +77,18 @@ impl AppState {
         }
         let path = dir.join(DATABASE_FILE);
         match SqliteRepository::open(&path) {
-            Ok(repo) => Self {
-                inner: Mutex::new(Inner {
-                    repo: Some(repo),
-                    error: None,
-                }),
-                data_dir: Some(dir.to_path_buf()),
-            },
+            Ok(mut repo) => {
+                // Replies still being written when Nimata last stopped cannot
+                // resume; record them as interrupted, keeping their text.
+                let _ = repo.recover_interrupted(UnixMillis::now());
+                Self {
+                    inner: Mutex::new(Inner {
+                        repo: Some(repo),
+                        error: None,
+                    }),
+                    data_dir: Some(dir.to_path_buf()),
+                }
+            }
             Err(e) => Self::failed(
                 format!("cannot open {}: {e}", path.display()),
                 Some(dir.to_path_buf()),

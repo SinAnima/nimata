@@ -10,12 +10,13 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params}
 use uuid::Uuid;
 
 use crate::domain::{
-    Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Participant,
-    ParticipantKind, Post, PostStatus, Revision, clean_body, clean_display_name, clean_title,
-    excerpt, title_from_body,
+    Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Generation,
+    GenerationStatus, ModelParticipant, Participant, ParticipantKind, Post, PostStatus,
+    ProviderConfig, ProviderKind, Revision, automatic_alias, clean_alias, clean_body,
+    clean_display_name, clean_title, excerpt, title_from_body,
 };
 use crate::error::{Error, Result};
-use crate::repository::Repository;
+use crate::repository::{GenerationOutcome, INTERRUPTED, Repository};
 use crate::time::{Timestamp, UnixMillis};
 
 /// Schema migrations, applied in order. The schema version is the number
@@ -23,7 +24,11 @@ use crate::time::{Timestamp, UnixMillis};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_initial.sql"),
     include_str!("../migrations/0002_history_and_tombstones.sql"),
+    include_str!("../migrations/0003_model_participants.sql"),
+    include_str!("../migrations/0004_aliases_and_settings.sql"),
 ];
+
+const DEFAULT_MODEL_SETTING: &str = "default_model";
 
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -249,6 +254,26 @@ fn insert_post(
     body: String,
     at: Timestamp,
 ) -> Result<Post> {
+    insert_post_with_status(
+        conn,
+        discussion_id,
+        parent_id,
+        author_id,
+        body,
+        at,
+        PostStatus::Complete,
+    )
+}
+
+fn insert_post_with_status(
+    conn: &Connection,
+    discussion_id: Uuid,
+    parent_id: Option<Uuid>,
+    author_id: Uuid,
+    body: String,
+    at: Timestamp,
+    status: PostStatus,
+) -> Result<Post> {
     let post = Post {
         id: Uuid::now_v7(),
         discussion_id,
@@ -259,7 +284,8 @@ fn insert_post(
         tz_offset_minutes: at.offset_minutes,
         edited_at: None,
         deleted_at: None,
-        status: PostStatus::Complete,
+        status,
+        provider_metadata: None,
     };
     conn.execute(
         "INSERT INTO posts (id, discussion_id, parent_id, author_id, body, created_at,
@@ -464,9 +490,13 @@ impl Repository for SqliteRepository {
         let body = clean_body(body)?;
         let tx = self.conn.transaction()?;
         check_discussion(&tx, discussion_id)?;
-        if let Some(parent_id) = parent_id {
-            check_parent(&tx, discussion_id, parent_id)?;
-        }
+        let Some(parent_id) = parent_id else {
+            return Err(Error::Invalid(
+                "a post replies to an earlier post; start a new discussion for a new topic".into(),
+            ));
+        };
+        check_parent(&tx, discussion_id, parent_id)?;
+        let parent_id = Some(parent_id);
         let post = insert_post(&tx, discussion_id, parent_id, author_id, body, at)?;
         tx.execute(
             "UPDATE discussions
@@ -555,11 +585,17 @@ impl Repository for SqliteRepository {
 
     fn delete_post(&mut self, post_id: Uuid, by: Uuid, at: UnixMillis) -> Result<Post> {
         let post = self.post(post_id)?;
-        if post.author_id != by {
+        // People own what they wrote; replies written by models belong to
+        // the person whose discussion it is.
+        let author_is_model = self.participant(post.author_id)?.kind != ParticipantKind::Human;
+        if post.author_id != by && !author_is_model {
             return Err(Error::Invalid("only the author can delete a post".into()));
         }
         if post.is_deleted() {
             return Ok(post);
+        }
+        if post.status == PostStatus::Streaming {
+            return Err(Error::Invalid("stop the reply before deleting it".into()));
         }
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -600,6 +636,461 @@ impl Repository for SqliteRepository {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    fn standard_provider(&mut self, kind: ProviderKind, at: UnixMillis) -> Result<ProviderConfig> {
+        let existing = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {PROVIDER_COLUMNS} FROM providers
+                     WHERE kind = ?1 ORDER BY created_at LIMIT 1"
+                ),
+                [kind.as_str()],
+                provider_from_row,
+            )
+            .optional()?;
+        if let Some(provider) = existing {
+            return Ok(provider);
+        }
+        let provider = ProviderConfig {
+            id: Uuid::now_v7(),
+            kind,
+            display_name: match kind {
+                ProviderKind::OpenAi => "OpenAI",
+                ProviderKind::Anthropic => "Anthropic",
+                ProviderKind::OpenAiCompatible => "OpenAI-compatible",
+            }
+            .to_string(),
+            base_url: None,
+        };
+        self.conn.execute(
+            "INSERT INTO providers (id, kind, display_name, base_url, created_at, modified_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
+            params![
+                provider.id.to_string(),
+                kind.as_str(),
+                provider.display_name,
+                at.0
+            ],
+        )?;
+        Ok(provider)
+    }
+
+    fn provider(&mut self, id: Uuid) -> Result<ProviderConfig> {
+        self.conn
+            .query_row(
+                &format!("SELECT {PROVIDER_COLUMNS} FROM providers WHERE id = ?1"),
+                [id.to_string()],
+                provider_from_row,
+            )
+            .optional()?
+            .ok_or(Error::NotFound("provider"))
+    }
+
+    fn set_provider_base_url(
+        &mut self,
+        id: Uuid,
+        base_url: Option<&str>,
+        at: UnixMillis,
+    ) -> Result<ProviderConfig> {
+        let base_url = base_url.map(str::trim).filter(|u| !u.is_empty());
+        if let Some(url) = base_url
+            && !(url.starts_with("https://") || url.starts_with("http://"))
+        {
+            return Err(Error::Invalid(
+                "an endpoint must start with https:// or http://".into(),
+            ));
+        }
+        let changed = self.conn.execute(
+            "UPDATE providers SET base_url = ?2, modified_at = ?3 WHERE id = ?1",
+            params![id.to_string(), base_url, at.0],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound("provider"));
+        }
+        self.provider(id)
+    }
+
+    fn model_participants(&mut self) -> Result<Vec<ModelParticipant>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, kind, display_name, provider, model, provider_id, enabled, aliases
+             FROM participants WHERE provider_id IS NOT NULL
+             ORDER BY display_name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let aliases: String = row.get(7)?;
+            Ok(ModelParticipant {
+                participant: participant_from_row(row)?,
+                provider_id: uuid_at(row, 5)?,
+                enabled: row.get(6)?,
+                aliases: serde_json::from_str(&aliases).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        e.into(),
+                    )
+                })?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn set_model(
+        &mut self,
+        provider_id: Uuid,
+        model: &str,
+        display_name: &str,
+        enabled: bool,
+    ) -> Result<ModelParticipant> {
+        let name = clean_display_name(display_name)?;
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(Error::Invalid("a model needs an ID".into()));
+        }
+        let provider = self.provider(provider_id)?;
+        let existing: Option<Uuid> = self
+            .conn
+            .query_row(
+                "SELECT id FROM participants WHERE provider_id = ?1 AND model = ?2",
+                params![provider_id.to_string(), model],
+                |row| uuid_at(row, 0),
+            )
+            .optional()?;
+        let id = match existing {
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE participants SET display_name = ?2, enabled = ?3 WHERE id = ?1",
+                    params![id.to_string(), name, enabled],
+                )?;
+                id
+            }
+            None => {
+                let id = Uuid::now_v7();
+                self.conn.execute(
+                    "INSERT INTO participants
+                       (id, kind, display_name, provider, model, provider_id, enabled)
+                     VALUES (?1, 'model', ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        id.to_string(),
+                        name,
+                        provider.kind.as_str(),
+                        model,
+                        provider_id.to_string(),
+                        enabled
+                    ],
+                )?;
+                id
+            }
+        };
+        self.model_participants()?
+            .into_iter()
+            .find(|m| m.participant.id == id)
+            .ok_or(Error::NotFound("model participant"))
+    }
+
+    fn set_model_aliases(
+        &mut self,
+        participant_id: Uuid,
+        aliases: &[String],
+    ) -> Result<ModelParticipant> {
+        let models = self.model_participants()?;
+        let this = models
+            .iter()
+            .find(|m| m.participant.id == participant_id)
+            .ok_or(Error::NotFound("model participant"))?;
+        let mut cleaned: Vec<String> = Vec::new();
+        for alias in aliases {
+            let alias = clean_alias(alias)?;
+            if alias == automatic_alias(&this.participant.display_name) || cleaned.contains(&alias)
+            {
+                continue;
+            }
+            if let Some(other) = models.iter().find(|m| {
+                m.participant.id != participant_id
+                    && (m.aliases.contains(&alias)
+                        || automatic_alias(&m.participant.display_name) == alias)
+            }) {
+                return Err(Error::Invalid(format!(
+                    "@{alias} already names {}",
+                    other.participant.display_name
+                )));
+            }
+            cleaned.push(alias);
+        }
+        self.conn.execute(
+            "UPDATE participants SET aliases = ?2 WHERE id = ?1",
+            params![
+                participant_id.to_string(),
+                serde_json::to_string(&cleaned).expect("strings always serialize")
+            ],
+        )?;
+        self.model_participants()?
+            .into_iter()
+            .find(|m| m.participant.id == participant_id)
+            .ok_or(Error::NotFound("model participant"))
+    }
+
+    fn default_model(&mut self) -> Result<Option<Uuid>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [DEFAULT_MODEL_SETTING],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(id) = value.and_then(|v| Uuid::parse_str(&v).ok()) else {
+            return Ok(None);
+        };
+        // Ignore a choice that no longer names a model.
+        let exists = self
+            .model_participants()?
+            .iter()
+            .any(|m| m.participant.id == id);
+        Ok(exists.then_some(id))
+    }
+
+    fn set_default_model(&mut self, participant_id: Option<Uuid>) -> Result<()> {
+        match participant_id {
+            None => {
+                self.conn.execute(
+                    "DELETE FROM app_settings WHERE key = ?1",
+                    [DEFAULT_MODEL_SETTING],
+                )?;
+            }
+            Some(id) => {
+                if !self
+                    .model_participants()?
+                    .iter()
+                    .any(|m| m.participant.id == id)
+                {
+                    return Err(Error::NotFound("model participant"));
+                }
+                self.conn.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![DEFAULT_MODEL_SETTING, id.to_string()],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_generation(
+        &mut self,
+        discussion_id: Uuid,
+        parent_id: Uuid,
+        participant_id: Uuid,
+        context_post_ids: &[Uuid],
+        at: Timestamp,
+    ) -> Result<(Post, Generation)> {
+        let enabled_model: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT enabled FROM participants
+                 WHERE id = ?1 AND kind = 'model' AND provider_id IS NOT NULL",
+                [participant_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match enabled_model {
+            None => return Err(Error::NotFound("model participant")),
+            Some(false) => {
+                return Err(Error::Invalid(
+                    "this model is turned off in Settings".into(),
+                ));
+            }
+            Some(true) => {}
+        }
+        let parent = self.post(parent_id)?;
+        if parent.status != PostStatus::Complete {
+            return Err(Error::Invalid(
+                "a model can only reply to a finished post".into(),
+            ));
+        }
+
+        let tx = self.conn.transaction()?;
+        check_discussion(&tx, discussion_id)?;
+        check_parent(&tx, discussion_id, parent_id)?;
+        let post = insert_post_with_status(
+            &tx,
+            discussion_id,
+            Some(parent_id),
+            participant_id,
+            String::new(),
+            at,
+            PostStatus::Streaming,
+        )?;
+        let generation = Generation {
+            id: Uuid::now_v7(),
+            post_id: post.id,
+            participant_id,
+            status: GenerationStatus::Sending,
+            error: None,
+            context_post_ids: context_post_ids.to_vec(),
+            started_at: at.at,
+            finished_at: None,
+        };
+        tx.execute(
+            "INSERT INTO generations
+               (id, post_id, participant_id, status, context_post_ids, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                generation.id.to_string(),
+                post.id.to_string(),
+                participant_id.to_string(),
+                generation_status_str(generation.status),
+                serde_json::to_string(&generation.context_post_ids)
+                    .expect("UUIDs always serialize"),
+                at.at.0
+            ],
+        )?;
+        tx.execute(
+            "UPDATE discussions
+             SET updated_at = max(updated_at, ?2), modified_at = max(modified_at, ?2)
+             WHERE id = ?1",
+            params![discussion_id.to_string(), at.at.0],
+        )?;
+        tx.commit()?;
+        Ok((post, generation))
+    }
+
+    fn update_generation(
+        &mut self,
+        generation_id: Uuid,
+        status: GenerationStatus,
+        body: &str,
+    ) -> Result<()> {
+        if status.is_finished() {
+            return Err(Error::Invalid(
+                "use finish_generation to end a reply".into(),
+            ));
+        }
+        let tx = self.conn.transaction()?;
+        let post_id: Option<String> = tx
+            .query_row(
+                "SELECT post_id FROM generations
+                 WHERE id = ?1 AND status IN ('queued', 'sending', 'streaming')",
+                [generation_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(post_id) = post_id else {
+            return Err(Error::NotFound("running reply"));
+        };
+        tx.execute(
+            "UPDATE generations SET status = ?2 WHERE id = ?1",
+            params![generation_id.to_string(), generation_status_str(status)],
+        )?;
+        tx.execute(
+            "UPDATE posts SET body = ?2 WHERE id = ?1",
+            params![post_id, body],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn finish_generation(
+        &mut self,
+        generation_id: Uuid,
+        outcome: GenerationOutcome,
+        at: UnixMillis,
+    ) -> Result<Post> {
+        let generation = self
+            .conn
+            .query_row(
+                &format!("SELECT {GENERATION_COLUMNS} FROM generations WHERE id = ?1"),
+                [generation_id.to_string()],
+                generation_from_row,
+            )
+            .optional()?
+            .ok_or(Error::NotFound("reply"))?;
+        if generation.status.is_finished() {
+            // Already ended, e.g. cancelled while the last text arrived.
+            return self.post(generation.post_id);
+        }
+        let post_status = match outcome.status {
+            GenerationStatus::Complete => PostStatus::Complete,
+            GenerationStatus::Failed => PostStatus::Failed,
+            GenerationStatus::Cancelled => PostStatus::Cancelled,
+            _ => {
+                return Err(Error::Invalid(
+                    "a reply can only end as complete, failed, or cancelled".into(),
+                ));
+            }
+        };
+        let metadata = outcome
+            .metadata
+            .as_ref()
+            .map(|m| serde_json::to_string(m).expect("metadata always serializes"));
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE posts
+             SET body = ?2, status = ?3, provider_metadata_json = ?4, modified_at = ?5
+             WHERE id = ?1",
+            params![
+                generation.post_id.to_string(),
+                outcome.body,
+                status_str(post_status),
+                metadata,
+                at.0
+            ],
+        )?;
+        tx.execute(
+            "UPDATE generations SET status = ?2, error = ?3, finished_at = ?4 WHERE id = ?1",
+            params![
+                generation_id.to_string(),
+                generation_status_str(outcome.status),
+                outcome.error,
+                at.0
+            ],
+        )?;
+        tx.execute(
+            "UPDATE discussions
+             SET updated_at = max(updated_at, ?2), modified_at = max(modified_at, ?2)
+             WHERE id = (SELECT discussion_id FROM posts WHERE id = ?1)",
+            params![generation.post_id.to_string(), at.0],
+        )?;
+        tx.commit()?;
+        self.post(generation.post_id)
+    }
+
+    fn generation_for_post(&mut self, post_id: Uuid) -> Result<Option<Generation>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {GENERATION_COLUMNS} FROM generations
+                     WHERE post_id = ?1 ORDER BY started_at DESC LIMIT 1"
+                ),
+                [post_id.to_string()],
+                generation_from_row,
+            )
+            .optional()?)
+    }
+
+    fn discussion_of_post(&mut self, post_id: Uuid) -> Result<(Uuid, Option<Uuid>)> {
+        let post = self.post(post_id)?;
+        Ok((post.discussion_id, post.parent_id))
+    }
+
+    fn recover_interrupted(&mut self, at: UnixMillis) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE posts SET status = 'failed', modified_at = ?1
+             WHERE id IN (SELECT post_id FROM generations
+                          WHERE status IN ('queued', 'sending', 'streaming'))",
+            [at.0],
+        )?;
+        let count = tx.execute(
+            "UPDATE generations SET status = 'failed', error = ?1, finished_at = ?2
+             WHERE status IN ('queued', 'sending', 'streaming')",
+            params![INTERRUPTED, at.0],
+        )?;
+        tx.commit()?;
+        Ok(count)
     }
 
     fn save_draft(
@@ -643,7 +1134,64 @@ impl Repository for SqliteRepository {
 }
 
 const POST_COLUMNS: &str = "id, discussion_id, parent_id, author_id, body, created_at, \
-     tz_offset_minutes, edited_at, deleted_at, status";
+     tz_offset_minutes, edited_at, deleted_at, status, provider_metadata_json";
+
+const PROVIDER_COLUMNS: &str = "id, kind, display_name, base_url";
+
+const GENERATION_COLUMNS: &str =
+    "id, post_id, participant_id, status, error, context_post_ids, started_at, finished_at";
+
+fn provider_from_row(row: &Row) -> rusqlite::Result<ProviderConfig> {
+    let kind = match row.get::<_, String>(1)?.as_str() {
+        "openai" => ProviderKind::OpenAi,
+        "anthropic" => ProviderKind::Anthropic,
+        "openai_compatible" => ProviderKind::OpenAiCompatible,
+        other => return Err(invalid_text(other)),
+    };
+    Ok(ProviderConfig {
+        id: uuid_at(row, 0)?,
+        kind,
+        display_name: row.get(2)?,
+        base_url: row.get(3)?,
+    })
+}
+
+fn generation_status_str(status: GenerationStatus) -> &'static str {
+    match status {
+        GenerationStatus::Queued => "queued",
+        GenerationStatus::Sending => "sending",
+        GenerationStatus::Streaming => "streaming",
+        GenerationStatus::Complete => "complete",
+        GenerationStatus::Failed => "failed",
+        GenerationStatus::Cancelled => "cancelled",
+    }
+}
+
+fn generation_from_row(row: &Row) -> rusqlite::Result<Generation> {
+    let status = match row.get::<_, String>(3)?.as_str() {
+        "queued" => GenerationStatus::Queued,
+        "sending" => GenerationStatus::Sending,
+        "streaming" => GenerationStatus::Streaming,
+        "complete" => GenerationStatus::Complete,
+        "failed" => GenerationStatus::Failed,
+        "cancelled" => GenerationStatus::Cancelled,
+        other => return Err(invalid_text(other)),
+    };
+    let context: String = row.get(5)?;
+    let context_post_ids = serde_json::from_str(&context).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, e.into())
+    })?;
+    Ok(Generation {
+        id: uuid_at(row, 0)?,
+        post_id: uuid_at(row, 1)?,
+        participant_id: uuid_at(row, 2)?,
+        status,
+        error: row.get(4)?,
+        context_post_ids,
+        started_at: UnixMillis(row.get(6)?),
+        finished_at: row.get::<_, Option<i64>>(7)?.map(UnixMillis),
+    })
+}
 
 fn revision_from_row(row: &Row) -> rusqlite::Result<Revision> {
     Ok(Revision {
@@ -737,6 +1285,12 @@ fn post_from_row(row: &Row) -> rusqlite::Result<Post> {
         edited_at: row.get::<_, Option<i64>>(7)?.map(UnixMillis),
         deleted_at: row.get::<_, Option<i64>>(8)?.map(UnixMillis),
         status: parse_status(&row.get::<_, String>(9)?)?,
+        provider_metadata: match row.get::<_, Option<String>>(10)? {
+            None => None,
+            Some(json) => Some(serde_json::from_str(&json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, e.into())
+            })?),
+        },
     })
 }
 

@@ -4,13 +4,18 @@
 // the Rust IPC tests check the real commands against the same shapes.
 
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import type {
   Discussion,
   DiscussionSummary,
   DiscussionView,
   Draft,
   Participant,
+  Generation,
+  KeyStatus,
+  ModelParticipant,
   Post,
+  ProviderConfig,
   Revision,
 } from "../lib/types";
 
@@ -46,6 +51,22 @@ export class FakeBackend {
   dialogPath: string | null = "/backups/nimata-backup.sqlite3";
   /** Set to make get/list fail as if the database could not be opened. */
   openError: string | null = null;
+
+  openai: ProviderConfig = {
+    id: "provider-openai",
+    kind: "openai",
+    displayName: "OpenAI",
+    baseUrl: null,
+  };
+  /** The saved key, kept here only to check it never reaches the UI. */
+  savedKey: string | null = null;
+  /** Shown in development builds. */
+  developmentBuild = true;
+  /** What "Test connection" finds, or an error to report. */
+  availableModels: string[] | string = ["gpt-5.6", "gpt-5.6-mini"];
+  models: ModelParticipant[] = [];
+  generations: Generation[] = [];
+  defaultModelId: string | null = null;
   /** Commands that should fail on their next call, with the error to return. */
   failures = new Map<string, string>();
   now = Date.UTC(2026, 9, 4, 16, 0);
@@ -143,6 +164,7 @@ export class FakeBackend {
       editedAt: null,
       deletedAt: null,
       status: "complete",
+      providerMetadata: null,
     };
     this.posts.push(post);
     return post;
@@ -150,12 +172,93 @@ export class FakeBackend {
 
   view(id: string): DiscussionView {
     const posts = this.posts.filter((p) => p.discussionId === id);
+    const authors = new Set(posts.map((p) => p.authorId));
     return {
       discussion: { ...this.#discussion(id) },
       posts,
-      participants: posts.length > 0 ? [{ ...this.me }] : [],
+      participants: [
+        { ...this.me },
+        ...this.models.map((m) => ({ ...m.participant })),
+      ].filter((p) => authors.has(p.id)),
       draft: this.drafts.get(id) ?? null,
     };
+  }
+
+  #keyStatus(): KeyStatus {
+    return {
+      source: this.savedKey ? "saved" : null,
+      hint:
+        this.savedKey && this.developmentBuild ? this.savedKey.slice(-4) : null,
+      store: "the Keychain",
+      environmentVariable: this.developmentBuild ? "OPENAI_API_KEY" : null,
+    };
+  }
+
+  #generation(postId: string): Generation {
+    const generation = this.generations.find((g) => g.postId === postId);
+    if (!generation) throw "reply not found";
+    return generation;
+  }
+
+  #startReply(parentId: string, participantId: string): Post {
+    const parent = this.#post(parentId);
+    if (parent.status !== "complete")
+      throw "a model can only reply to a finished post";
+    if (!this.savedKey) throw "Add an OpenAI API key in Settings, Models.";
+    const model = this.models.find((m) => m.participant.id === participantId);
+    if (!model) throw "this model is no longer set up in Settings";
+    const post: Post = {
+      ...this.#insertPost(parent.discussionId, parent.id, ""),
+      authorId: model.participant.id,
+      status: "streaming",
+    };
+    this.posts[this.posts.length - 1] = post;
+    this.generations.push({
+      id: `generation-${post.id}`,
+      postId: post.id,
+      participantId,
+      status: "sending",
+      error: null,
+      contextPostIds: [parent.id],
+      startedAt: post.createdAt,
+      finishedAt: null,
+    });
+    return { ...post };
+  }
+
+  /** Streams text into a reply the way the Rust runner does. */
+  async streamText(postId: string, ...pieces: string[]): Promise<void> {
+    const post = this.#post(postId);
+    for (const text of pieces) {
+      post.body += text;
+      await emit("nimata://post-delta", { postId, text });
+    }
+  }
+
+  /** Ends a reply as complete, failed, or cancelled, and announces it. */
+  async endReply(
+    postId: string,
+    status: "complete" | "failed" | "cancelled",
+    error: string | null = null,
+  ): Promise<void> {
+    const post = this.#post(postId);
+    const generation = this.#generation(postId);
+    post.status = status;
+    generation.status = status;
+    generation.error = error;
+    generation.finishedAt = this.#tick();
+    if (status === "complete") {
+      post.providerMetadata = {
+        provider: "openai",
+        model: "gpt-5.6-2026-08-01",
+        responseId: "resp_1",
+        requestId: "req_1",
+        inputTokens: 41,
+        outputTokens: 12,
+        incompleteReason: null,
+      };
+    }
+    await emit("nimata://post-updated", { ...post });
   }
 
   handle(cmd: string, args: Args): unknown {
@@ -220,6 +323,8 @@ export class FakeBackend {
       case "add_post": {
         const d = this.#discussion(args.discussionId);
         const body = this.#cleanBody(args.body);
+        if (args.parentId === null || args.parentId === undefined)
+          throw "a post replies to an earlier post; start a new discussion for a new topic";
         this.#checkParent(d.id, args.parentId);
         const post = this.#insertPost(
           d.id,
@@ -319,6 +424,95 @@ export class FakeBackend {
         this.openError = null;
         return this.dialogPath;
       }
+      case "providers":
+        return [
+          {
+            provider: { ...this.openai },
+            key: this.#keyStatus(),
+            models: structuredClone(this.models),
+          },
+        ];
+      case "save_api_key": {
+        const key = String(args.key).trim();
+        if (key === "") throw "paste the API key first";
+        this.savedKey = key;
+        return this.#keyStatus();
+      }
+      case "remove_api_key":
+        this.savedKey = null;
+        return this.#keyStatus();
+      case "provider_models":
+        if (!this.savedKey) throw "Add an OpenAI API key first.";
+        if (typeof this.availableModels === "string")
+          throw this.availableModels;
+        return this.availableModels.map((id) => ({ id }));
+      case "set_model": {
+        const model = String(args.model).trim();
+        const name = String(args.displayName).trim();
+        if (name === "") throw "names must be 1 to 80 characters";
+        let entry = this.models.find((m) => m.participant.model === model);
+        if (entry) {
+          entry.participant.displayName = name;
+          entry.enabled = Boolean(args.enabled);
+        } else {
+          entry = {
+            participant: {
+              id: `model-${model}`,
+              kind: "model",
+              displayName: name,
+              provider: "openai",
+              model,
+            },
+            providerId: this.openai.id,
+            enabled: Boolean(args.enabled),
+            aliases: [],
+          };
+          this.models.push(entry);
+        }
+        return structuredClone(entry);
+      }
+      case "ask_model":
+        return this.#startReply(
+          String(args.parentId),
+          String(args.participantId),
+        );
+      case "cancel_reply": {
+        const post = this.#post(args.postId);
+        if (post.status !== "streaming") return false;
+        void this.endReply(post.id, "cancelled");
+        return true;
+      }
+      case "retry_reply": {
+        const generation = this.#generation(String(args.postId));
+        const post = this.#post(args.postId);
+        return this.#startReply(post.parentId!, generation.participantId);
+      }
+      case "set_model_aliases": {
+        const model = this.models.find(
+          (m) => m.participant.id === args.participantId,
+        );
+        if (!model) throw "model participant not found";
+        const cleaned = (args.aliases as string[])
+          .map((a) => a.trim().replace(/^@/, "").toLowerCase())
+          .filter((a) => a !== "");
+        for (const alias of cleaned) {
+          if (/\s/.test(alias)) throw `"${alias}" cannot be an alias`;
+          const other = this.models.find(
+            (m) => m !== model && m.aliases.includes(alias),
+          );
+          if (other)
+            throw `@${alias} already names ${other.participant.displayName}`;
+        }
+        model.aliases = [...new Set(cleaned)];
+        return structuredClone(model);
+      }
+      case "default_model":
+        return this.defaultModelId;
+      case "set_default_model":
+        this.defaultModelId = (args.participantId as string | null) ?? null;
+        return null;
+      case "reply_details":
+        return this.generations.find((g) => g.postId === args.postId) ?? null;
       case "app_info":
         return {
           version: "0.1.0",

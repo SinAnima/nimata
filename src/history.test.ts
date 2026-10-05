@@ -35,8 +35,9 @@ async function confirmWith(label: string) {
   await fireEvent.click(within(dialog).getByRole("button", { name: label }));
 }
 
-async function openSettings() {
+async function openSettings(tab = "Data") {
   await fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+  await fireEvent.click(screen.getByRole("tab", { name: tab }));
 }
 
 async function chooseFromMenu(item: string) {

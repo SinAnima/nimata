@@ -38,6 +38,71 @@ export interface Post {
   /** Set when deleted; the post stays as a tombstone with an empty body. */
   deletedAt: UnixMillis | null;
   status: PostStatus;
+  /** For model replies: which provider and model version answered. */
+  providerMetadata: ProviderMetadata | null;
+}
+
+export interface ProviderMetadata {
+  provider: string;
+  model: string | null;
+  responseId: string | null;
+  requestId: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  incompleteReason: string | null;
+}
+
+export type ProviderKind = "openai" | "anthropic" | "openai_compatible";
+
+export interface ProviderConfig {
+  id: Uuid;
+  kind: ProviderKind;
+  displayName: string;
+  baseUrl: string | null;
+}
+
+export interface KeyStatus {
+  /** Where the key in use comes from, or null when there is none. */
+  source: "saved" | "environment" | null;
+  /** Last four characters, in development builds only. */
+  hint: string | null;
+  /** Where saved keys are kept, e.g. "the Keychain". */
+  store: string;
+  /** The environment variable read in development builds, if any. */
+  environmentVariable: string | null;
+}
+
+export interface ModelParticipant {
+  participant: Participant;
+  providerId: Uuid;
+  enabled: boolean;
+  /** Names it can be mentioned by, without "@". */
+  aliases: string[];
+}
+
+export interface ProviderView {
+  provider: ProviderConfig;
+  key: KeyStatus;
+  models: ModelParticipant[];
+}
+
+export interface ModelInfo {
+  id: string;
+}
+
+export type GenerationStatus =
+  "queued" | "sending" | "streaming" | "complete" | "failed" | "cancelled";
+
+export interface Generation {
+  id: Uuid;
+  postId: Uuid;
+  participantId: Uuid;
+  status: GenerationStatus;
+  error: string | null;
+  /** Exactly which posts were sent to the model, in order. */
+  contextPostIds: Uuid[];
+  startedAt: UnixMillis;
+  finishedAt: UnixMillis | null;
 }
 
 /** An earlier version of an edited post. */

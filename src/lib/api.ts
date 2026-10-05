@@ -4,6 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  Generation,
+  KeyStatus,
+  ModelInfo,
+  ModelParticipant,
+  ProviderView,
   DatabaseStatus,
   Discussion,
   DiscussionFilter,
@@ -17,6 +22,8 @@ import type {
 } from "./types";
 
 export const CLOCK_TICK = "nimata://clock-tick";
+export const POST_DELTA = "nimata://post-delta";
+export const POST_UPDATED = "nimata://post-updated";
 
 export function appInfo(): Promise<AppInfo> {
   return invoke("app_info");
@@ -104,6 +111,82 @@ export function backupDatabase(): Promise<string | null> {
 /** Asks for a backup file; resolves to its path, or null if cancelled. */
 export function restoreDatabase(): Promise<string | null> {
   return invoke("restore_database");
+}
+
+export function providers(): Promise<ProviderView[]> {
+  return invoke("providers");
+}
+
+export function saveApiKey(providerId: Uuid, key: string): Promise<KeyStatus> {
+  return invoke("save_api_key", { providerId, key });
+}
+
+export function removeApiKey(providerId: Uuid): Promise<KeyStatus> {
+  return invoke("remove_api_key", { providerId });
+}
+
+/** Lists the provider's text models; also proves the key works. */
+export function providerModels(providerId: Uuid): Promise<ModelInfo[]> {
+  return invoke("provider_models", { providerId });
+}
+
+export function setModel(
+  providerId: Uuid,
+  model: string,
+  displayName: string,
+  enabled: boolean,
+): Promise<ModelParticipant> {
+  return invoke("set_model", { providerId, model, displayName, enabled });
+}
+
+/** Starts a model reply; it streams in through post events. */
+export function askModel(
+  discussionId: Uuid,
+  parentId: Uuid,
+  participantId: Uuid,
+): Promise<Post> {
+  return invoke("ask_model", { discussionId, parentId, participantId });
+}
+
+export function cancelReply(postId: Uuid): Promise<boolean> {
+  return invoke("cancel_reply", { postId });
+}
+
+export function retryReply(postId: Uuid): Promise<Post> {
+  return invoke("retry_reply", { postId });
+}
+
+export function replyDetails(postId: Uuid): Promise<Generation | null> {
+  return invoke("reply_details", { postId });
+}
+
+export function setModelAliases(
+  participantId: Uuid,
+  aliases: string[],
+): Promise<ModelParticipant> {
+  return invoke("set_model_aliases", { participantId, aliases });
+}
+
+export function defaultModel(): Promise<Uuid | null> {
+  return invoke("default_model");
+}
+
+export function setDefaultModel(participantId: Uuid | null): Promise<void> {
+  return invoke("set_default_model", { participantId });
+}
+
+export function onPostDelta(
+  handler: (delta: { postId: Uuid; text: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ postId: Uuid; text: string }>(POST_DELTA, (e) =>
+    handler(e.payload),
+  );
+}
+
+export function onPostUpdated(
+  handler: (post: Post) => void,
+): Promise<UnlistenFn> {
+  return listen<Post>(POST_UPDATED, (e) => handler(e.payload));
 }
 
 export function onClockTick(

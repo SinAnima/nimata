@@ -19,9 +19,23 @@ tauri = { version = "2", features = [] }
 serde.workspace = true
 uuid.workspace = true
 tauri-plugin-dialog = "2"
+tokio = { version = "1.53.2", features = ["macros", "sync", "time"] }
+futures-util = "0.3.34"
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json.workspace = true
 tauri = { version = "2", features = ["test"] }
 tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["macros", "sync", "time", "net", "io-util", "rt-multi-thread"] }
+
+# API keys live in the operating system's credential store. Android has no
+# store here yet (Stage 9); the app says so instead of keeping keys elsewhere.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }

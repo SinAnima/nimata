@@ -9,6 +9,8 @@ use tauri::test::{
 };
 use tauri::webview::{InvokeRequest, WebviewWindow, WebviewWindowBuilder};
 
+use crate::generation::Generations;
+use crate::secrets::{Keys, MemorySecretStore};
 use crate::state::AppState;
 
 fn app() -> WebviewWindow<MockRuntime> {
@@ -16,6 +18,12 @@ fn app() -> WebviewWindow<MockRuntime> {
         .manage(AppState::with_repo(
             SqliteRepository::open_in_memory().unwrap(),
         ))
+        .manage(Keys::new(
+            Box::new(MemorySecretStore::default()),
+            true,
+            |_| None,
+        ))
+        .manage(Generations::default())
         .build(mock_context(noop_assets()))
         .unwrap();
     WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -198,4 +206,372 @@ fn exported_json_is_the_canonical_archive() {
     let archive = DiscussionArchive::from_json(&json).unwrap();
     assert_eq!(archive.posts[0].body, "second");
     assert_eq!(archive.posts[0].revisions[0].body, "first");
+}
+
+mod replies {
+    //! Model replies end to end: IPC commands, the generation runner, the
+    //! OpenAI adapter, and the database, against a local server that
+    //! replays a recorded OpenAI stream.
+
+    use super::*;
+    use nimata_core::Repository;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    const RECORDED: &str =
+        include_str!("../../crates/nimata-core/tests/fixtures/openai_responses_stream.sse");
+
+    struct Reply {
+        status: &'static str,
+        body: String,
+        /// Pause before closing, to keep a stream open.
+        hold: Duration,
+    }
+
+    /// Serves each reply to one connection, in order, on a background thread.
+    fn serve(replies: Vec<Reply>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut socket, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = Vec::new();
+                let mut buf = [0u8; 8192];
+                loop {
+                    let n = socket.read(&mut buf).unwrap_or(0);
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let content_type = if reply.status.starts_with("200") {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                let head = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {content_type}\r\nx-request-id: req_test\r\nConnection: close\r\n\r\n",
+                    reply.status
+                );
+                let _ = socket.write_all(head.as_bytes());
+                for chunk in reply.body.as_bytes().chunks(64) {
+                    let _ = socket.write_all(chunk);
+                    let _ = socket.flush();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                std::thread::sleep(reply.hold);
+            }
+        });
+        base
+    }
+
+    struct Setup {
+        w: WebviewWindow<MockRuntime>,
+        discussion: Value,
+        question: Value,
+        model: Value,
+    }
+
+    /// A discussion with one question, OpenAI pointed at `base`, a key
+    /// saved, and GPT-5.6 enabled.
+    fn setup(base: &str) -> Setup {
+        let w = app();
+        let providers = invoke(&w, "providers", json!({})).unwrap();
+        let provider_id = providers[0]["provider"]["id"].clone();
+        {
+            let state = w.state::<AppState>();
+            let id = uuid::Uuid::parse_str(provider_id.as_str().unwrap()).unwrap();
+            state
+                .repo()
+                .unwrap()
+                .set_provider_base_url(id, Some(base), nimata_core::UnixMillis(0))
+                .unwrap();
+        }
+        invoke(
+            &w,
+            "save_api_key",
+            json!({ "providerId": provider_id, "key": "sk-test-1234" }),
+        )
+        .unwrap();
+        let model = invoke(
+            &w,
+            "set_model",
+            json!({ "providerId": provider_id, "model": "gpt-5.6", "displayName": "GPT-5.6", "enabled": true }),
+        )
+        .unwrap();
+        let view = invoke(
+            &w,
+            "start_discussion",
+            json!({ "title": "", "body": "Should Nimata use CouchDB?" }),
+        )
+        .unwrap();
+        Setup {
+            discussion: view["discussion"]["id"].clone(),
+            question: view["posts"][0]["id"].clone(),
+            model: model["participant"]["id"].clone(),
+            w,
+        }
+    }
+
+    fn ask(s: &Setup, parent: &Value) -> Result<Value, Value> {
+        invoke(
+            &s.w,
+            "ask_model",
+            json!({ "discussionId": s.discussion, "parentId": parent, "participantId": s.model }),
+        )
+    }
+
+    /// Waits until the reply in `post_id` has finished, and returns its record.
+    fn finished(s: &Setup, post_id: &Value) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let details = invoke(&s.w, "reply_details", json!({ "postId": post_id })).unwrap();
+            let status = details["status"].as_str().unwrap_or_default();
+            if ["complete", "failed", "cancelled"].contains(&status) {
+                return details;
+            }
+            assert!(Instant::now() < deadline, "reply did not finish: {details}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn post(s: &Setup, id: &Value) -> Value {
+        let view = invoke(&s.w, "get_discussion", json!({ "id": s.discussion })).unwrap();
+        view["posts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == *id)
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_model_reply_streams_into_a_post() {
+        let base = serve(vec![Reply {
+            status: "200 OK",
+            body: RECORDED.into(),
+            hold: Duration::ZERO,
+        }]);
+        let s = setup(&base);
+
+        let reply = ask(&s, &s.question).unwrap();
+        assert_eq!(reply["status"], "streaming");
+        assert_eq!(reply["parentId"], s.question);
+
+        let details = finished(&s, &reply["id"]);
+        assert_eq!(details["status"], "complete");
+        assert_eq!(details["contextPostIds"], json!([s.question]));
+
+        let done = post(&s, &reply["id"]);
+        assert_eq!(
+            done["body"],
+            "Replication is the attraction, but mobile changes the constraints."
+        );
+        assert_eq!(done["status"], "complete");
+        assert_eq!(done["providerMetadata"]["model"], "gpt-5.6-2026-08-01");
+        assert_eq!(done["providerMetadata"]["requestId"], "req_test");
+        assert_eq!(done["providerMetadata"]["outputTokens"], 12);
+        assert_ne!(
+            done["id"], done["providerMetadata"]["responseId"],
+            "provider IDs never become Nimata IDs"
+        );
+    }
+
+    #[test]
+    fn cancelling_keeps_the_text_received_so_far() {
+        let partial = &RECORDED[..RECORDED.find("but mobile").unwrap()];
+        let base = serve(vec![Reply {
+            status: "200 OK",
+            body: partial.into(),
+            hold: Duration::from_secs(5),
+        }]);
+        let s = setup(&base);
+        let reply = ask(&s, &s.question).unwrap();
+
+        // Wait for some text to arrive, then stop the reply.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while post(&s, &reply["id"])["body"].as_str().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "no text arrived");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            invoke(&s.w, "cancel_reply", json!({ "postId": reply["id"] })).unwrap(),
+            json!(true)
+        );
+
+        let details = finished(&s, &reply["id"]);
+        assert_eq!(details["status"], "cancelled");
+        let stopped = post(&s, &reply["id"]);
+        assert_eq!(stopped["status"], "cancelled");
+        assert!(
+            stopped["body"].as_str().unwrap().starts_with("Replication"),
+            "{stopped}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_key_fails_with_an_explanation_and_can_be_retried() {
+        let base = serve(vec![
+            Reply {
+                status: "401 Unauthorized",
+                body:
+                    r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#
+                        .into(),
+                hold: Duration::ZERO,
+            },
+            Reply {
+                status: "200 OK",
+                body: RECORDED.into(),
+                hold: Duration::ZERO,
+            },
+        ]);
+        let s = setup(&base);
+        let reply = ask(&s, &s.question).unwrap();
+        let details = finished(&s, &reply["id"]);
+        assert_eq!(details["status"], "failed");
+        assert!(
+            details["error"]
+                .as_str()
+                .unwrap()
+                .contains("rejected the API key"),
+            "{details}"
+        );
+        assert_eq!(post(&s, &reply["id"])["status"], "failed");
+        assert!(
+            details["error"]
+                .as_str()
+                .unwrap()
+                .contains("Incorrect API key provided"),
+            "{details}"
+        );
+        assert_eq!(
+            post(&s, &reply["id"])["providerMetadata"]["requestId"],
+            "req_test"
+        );
+
+        let retried = invoke(&s.w, "retry_reply", json!({ "postId": reply["id"] })).unwrap();
+        assert_ne!(retried["id"], reply["id"], "a retry is a new reply");
+        assert_eq!(retried["parentId"], s.question, "to the same post");
+        assert_eq!(finished(&s, &retried["id"])["status"], "complete");
+        assert_eq!(
+            post(&s, &reply["id"])["status"],
+            "failed",
+            "the failed reply stays"
+        );
+    }
+
+    #[test]
+    fn an_error_inside_the_stream_reaches_the_person_with_its_reason() {
+        let stream = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",",
+            "\"code\":\"unsupported_value\",\"message\":\"Streaming is not supported for this model\"}}\n\n",
+        );
+        let base = serve(vec![Reply {
+            status: "200 OK",
+            body: stream.into(),
+            hold: Duration::ZERO,
+        }]);
+        let s = setup(&base);
+        let reply = ask(&s, &s.question).unwrap();
+        let details = finished(&s, &reply["id"]);
+        assert_eq!(details["status"], "failed");
+        assert_eq!(
+            details["error"],
+            "OpenAI reported an error while replying. (Streaming is not supported for this model [unsupported_value])"
+        );
+        assert_eq!(
+            post(&s, &reply["id"])["providerMetadata"]["requestId"],
+            "req_test"
+        );
+    }
+
+    #[test]
+    fn aliases_and_the_default_model_round_trip() {
+        let base = serve(vec![]);
+        let s = setup(&base);
+        let model = invoke(
+            &s.w,
+            "set_model_aliases",
+            json!({ "participantId": s.model, "aliases": ["@Review", "r"] }),
+        )
+        .unwrap();
+        assert_eq!(model["aliases"], json!(["review", "r"]));
+        let providers = invoke(&s.w, "providers", json!({})).unwrap();
+        assert_eq!(providers[0]["models"][0]["aliases"], json!(["review", "r"]));
+
+        assert_eq!(
+            invoke(&s.w, "default_model", json!({})).unwrap(),
+            Value::Null
+        );
+        invoke(
+            &s.w,
+            "set_default_model",
+            json!({ "participantId": s.model }),
+        )
+        .unwrap();
+        assert_eq!(invoke(&s.w, "default_model", json!({})).unwrap(), s.model);
+        invoke(&s.w, "set_default_model", json!({ "participantId": null })).unwrap();
+        assert_eq!(
+            invoke(&s.w, "default_model", json!({})).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn asking_without_a_key_explains_what_to_do() {
+        let base = serve(vec![]);
+        let s = setup(&base);
+        let providers = invoke(&s.w, "providers", json!({})).unwrap();
+        invoke(
+            &s.w,
+            "remove_api_key",
+            json!({ "providerId": providers[0]["provider"]["id"] }),
+        )
+        .unwrap();
+
+        let error = ask(&s, &s.question).unwrap_err();
+        assert_eq!(error, json!("Add an OpenAI API key in Settings, Models."));
+        let view = invoke(&s.w, "get_discussion", json!({ "id": s.discussion })).unwrap();
+        assert_eq!(
+            view["posts"].as_array().unwrap().len(),
+            1,
+            "nothing was created"
+        );
+    }
+
+    #[test]
+    fn the_settings_overview_never_contains_the_key() {
+        let base = serve(vec![]);
+        let s = setup(&base);
+        let providers = invoke(&s.w, "providers", json!({})).unwrap();
+        let text = providers.to_string();
+        assert!(!text.contains("sk-test-1234"), "{text}");
+        assert_eq!(providers[0]["key"]["source"], "saved");
+        assert_eq!(
+            providers[0]["models"][0]["participant"]["displayName"],
+            "GPT-5.6"
+        );
+    }
 }

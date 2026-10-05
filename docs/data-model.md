@@ -21,7 +21,7 @@ than risk changing it.
 Migration tests load frozen databases from earlier versions
 (`crates/nimata-core/tests/fixtures/`) and check that nothing is lost.
 
-## Tables (schema version 2)
+## Tables (schema version 4)
 
 ### participants
 
@@ -150,3 +150,55 @@ migrates it if it came from an older version.
 If the database cannot be opened at startup (damaged, or not a Nimata
 database), Nimata says why and offers to restore a backup. The unusable file
 is kept beside the new one with a `.damaged-<time>` suffix, never deleted.
+
+## Models (schema version 3)
+
+### providers
+
+Non-secret settings for each provider connection. API keys are never stored
+here (see [privacy.md](privacy.md#api-keys)).
+
+| column                  | meaning                                            |
+| ----------------------- | -------------------------------------------------- |
+| id                      | UUIDv7; also names the key in the credential store |
+| kind                    | `openai`, `anthropic`, or `openai_compatible`      |
+| display_name            | e.g. "OpenAI"                                      |
+| base_url                | endpoint, or null for the provider's standard one  |
+| created_at, modified_at | bookkeeping                                        |
+
+Model participants are rows in `participants` with `kind = 'model'`, plus
+`provider_id` and `enabled`. One participant per provider and model.
+
+### generations
+
+One row per request to a model. The reply itself is an ordinary post.
+
+| column                  | meaning                                                             |
+| ----------------------- | ------------------------------------------------------------------- |
+| id                      | UUIDv7                                                              |
+| post_id                 | the reply post                                                      |
+| participant_id          | the model asked                                                     |
+| status                  | `queued`, `sending`, `streaming`, `complete`, `failed`, `cancelled` |
+| error                   | message for people, when failed                                     |
+| context_post_ids        | JSON array: exactly which posts were sent, in order                 |
+| started_at, finished_at | when it ran                                                         |
+
+A reply post's `status` follows its request (`streaming` while it runs),
+and `provider_metadata_json` holds the provider, exact model version,
+provider response and request IDs, and token counts once it finishes.
+Requests still running at startup are marked failed with "Nimata was closed
+before this reply was finished", keeping the text received.
+
+Model replies cannot be edited. The person whose discussion it is can
+delete them, once they are no longer streaming.
+
+## Aliases and settings (schema version 4)
+
+`participants.aliases` holds a model's own aliases as a JSON array of
+lowercase strings, e.g. `["review", "r"]`. Each names exactly one model:
+an alias cannot equal another model's alias or automatic alias (its name in
+lowercase letters and digits).
+
+`app_settings` is a key-value table for small preferences. `default_model`
+holds the participant ID of the model asked when neither a mention nor the
+thread decides.
