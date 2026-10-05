@@ -35,7 +35,25 @@ export interface Post {
   /** Author's UTC offset in minutes when the post was written. */
   tzOffsetMinutes: number;
   editedAt: UnixMillis | null;
+  /** Set when deleted; the post stays as a tombstone with an empty body. */
+  deletedAt: UnixMillis | null;
   status: PostStatus;
+}
+
+/** An earlier version of an edited post. */
+export interface Revision {
+  postId: Uuid;
+  body: string;
+  /** When this text became the post's body. */
+  writtenAt: UnixMillis;
+  /** When an edit replaced it. */
+  replacedAt: UnixMillis;
+}
+
+export interface DatabaseStatus {
+  path: string | null;
+  /** Why the database could not be opened, if it could not. */
+  error: string | null;
 }
 
 export interface DiscussionSummary {

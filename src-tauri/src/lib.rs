@@ -17,12 +17,21 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::rename_discussion,
         commands::set_archived,
         commands::save_draft,
+        commands::edit_post,
+        commands::post_revisions,
+        commands::delete_post,
+        commands::delete_discussion,
+        commands::database_status,
+        commands::export_discussion,
+        commands::backup_database,
+        commands::restore_database,
     ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     with_commands(tauri::Builder::default())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(state::AppState::open(app.handle()));
             events::start_clock(app.handle().clone());

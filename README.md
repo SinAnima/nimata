@@ -18,9 +18,11 @@ The name comes from the Greek νήματα, "threads".
 ## Status
 
 Early development. Nimata works as a private threaded notebook: start
-discussions, reply to any post, rename and archive discussions, and keep
-unsent drafts. Everything is stored in a local SQLite database. Model
-participants arrive in a later stage.
+discussions, reply to any post, edit posts while keeping their earlier
+versions, delete posts or discussions, rename and archive discussions, and
+keep unsent drafts. Everything is stored in a local SQLite database that
+you can back up and restore from Settings, and any discussion can be
+exported as documented JSON. Model participants arrive in a later stage.
 
 Keyboard shortcuts on desktop:
 
@@ -30,6 +32,7 @@ Keyboard shortcuts on desktop:
 | Cmd+Enter | Post, or start the discussion |
 | J / K     | Next / previous post          |
 | R         | Reply to the focused post     |
+| E         | Edit the focused post (yours) |
 | Esc       | Cancel the reply target       |
 
 ## Principles

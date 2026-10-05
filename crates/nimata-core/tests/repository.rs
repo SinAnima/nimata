@@ -199,7 +199,8 @@ fn discussions_are_listed_by_latest_activity() {
         assert_eq!(summary.last_activity_at, UnixMillis(T0 + 20 * MINUTE));
 
         // Renaming is not activity.
-        repo.rename_discussion(new.id, "Renamed").unwrap();
+        repo.rename_discussion(new.id, "Renamed", UnixMillis(T0))
+            .unwrap();
         assert_eq!(titles(repo), vec!["Old", "Renamed"]);
     });
 }
@@ -212,15 +213,17 @@ fn renaming_trims_and_rejects_empty_titles() {
             .start_discussion("Before", me.id, "x", at(0, 0))
             .unwrap();
         assert_eq!(
-            repo.rename_discussion(d.id, "  After ").unwrap().title,
+            repo.rename_discussion(d.id, "  After ", UnixMillis(T0))
+                .unwrap()
+                .title,
             "After"
         );
         assert!(matches!(
-            repo.rename_discussion(d.id, ""),
+            repo.rename_discussion(d.id, "", UnixMillis(T0)),
             Err(Error::Invalid(_))
         ));
         assert!(matches!(
-            repo.rename_discussion(uuid::Uuid::now_v7(), "x"),
+            repo.rename_discussion(uuid::Uuid::now_v7(), "x", UnixMillis(T0)),
             Err(Error::NotFound(_))
         ));
     });
@@ -301,5 +304,179 @@ fn an_empty_draft_without_a_reply_target_is_removed() {
                 .unwrap()
                 .is_some()
         );
+    });
+}
+
+#[test]
+fn editing_keeps_every_earlier_version() {
+    for_each_repo(|repo| {
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo
+            .start_discussion("D", me.id, "first", at(0, 0))
+            .unwrap();
+
+        let edited = repo
+            .edit_post(root.id, me.id, "second", UnixMillis(T0 + MINUTE))
+            .unwrap();
+        assert_eq!(edited.body, "second");
+        assert_eq!(edited.edited_at, Some(UnixMillis(T0 + MINUTE)));
+        assert_eq!(
+            edited.created_at, root.created_at,
+            "creation time is untouched"
+        );
+        repo.edit_post(root.id, me.id, "third", UnixMillis(T0 + 2 * MINUTE))
+            .unwrap();
+
+        let revisions = repo.post_revisions(root.id).unwrap();
+        let history: Vec<_> = revisions
+            .iter()
+            .map(|r| (r.body.as_str(), r.written_at.0, r.replaced_at.0))
+            .collect();
+        assert_eq!(
+            history,
+            vec![
+                ("first", T0, T0 + MINUTE),
+                ("second", T0 + MINUTE, T0 + 2 * MINUTE)
+            ]
+        );
+        assert_eq!(
+            repo.discussion_revisions(d.id).unwrap()[&root.id],
+            revisions
+        );
+        assert_eq!(repo.get_discussion(d.id).unwrap().posts[0].body, "third");
+    });
+}
+
+#[test]
+fn an_unchanged_edit_records_nothing() {
+    for_each_repo(|repo| {
+        let me = repo.local_user().unwrap();
+        let (_, root) = repo.start_discussion("D", me.id, "same", at(0, 0)).unwrap();
+        let after = repo
+            .edit_post(root.id, me.id, "\nsame\n", UnixMillis(T0 + 1))
+            .unwrap();
+        assert_eq!(after.edited_at, None);
+        assert!(repo.post_revisions(root.id).unwrap().is_empty());
+    });
+}
+
+#[test]
+fn only_the_author_can_edit_or_delete() {
+    for_each_repo(|repo| {
+        let me = repo.local_user().unwrap();
+        let (_, root) = repo.start_discussion("D", me.id, "mine", at(0, 0)).unwrap();
+        let someone = uuid::Uuid::now_v7();
+        assert!(matches!(
+            repo.edit_post(root.id, someone, "theirs", UnixMillis(T0)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            repo.delete_post(root.id, someone, UnixMillis(T0)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            repo.edit_post(uuid::Uuid::now_v7(), me.id, "x", UnixMillis(T0)),
+            Err(Error::NotFound(_))
+        ));
+    });
+}
+
+#[test]
+fn a_deleted_post_stays_in_the_thread_without_its_text() {
+    for_each_repo(|repo| {
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo
+            .start_discussion("D", me.id, "question", at(0, 0))
+            .unwrap();
+        let reply = repo
+            .add_post(d.id, Some(root.id), me.id, "regrettable", at(1, 0))
+            .unwrap();
+        let answer = repo
+            .add_post(d.id, Some(reply.id), me.id, "answer", at(2, 0))
+            .unwrap();
+        repo.edit_post(
+            reply.id,
+            me.id,
+            "more regrettable",
+            UnixMillis(T0 + 3 * MINUTE),
+        )
+        .unwrap();
+        repo.save_draft(d.id, Some(reply.id), "draft", UnixMillis(T0))
+            .unwrap();
+
+        let deleted = repo
+            .delete_post(reply.id, me.id, UnixMillis(T0 + 4 * MINUTE))
+            .unwrap();
+        assert_eq!(deleted.body, "");
+        assert_eq!(deleted.deleted_at, Some(UnixMillis(T0 + 4 * MINUTE)));
+
+        let view = repo.get_discussion(d.id).unwrap();
+        assert_eq!(view.posts.len(), 3, "the tombstone keeps its place");
+        assert_eq!(
+            view.posts[2].parent_id,
+            Some(reply.id),
+            "replies keep their parent"
+        );
+        assert!(
+            repo.post_revisions(reply.id).unwrap().is_empty(),
+            "history is erased too"
+        );
+        let draft = view.draft.unwrap();
+        assert_eq!((draft.body.as_str(), draft.parent_id), ("draft", None));
+
+        assert!(matches!(
+            repo.add_post(d.id, Some(reply.id), me.id, "late", at(5, 0)),
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            repo.edit_post(reply.id, me.id, "back", UnixMillis(T0)),
+            Err(Error::Invalid(_))
+        ));
+
+        let summary = &repo.list_discussions(DiscussionFilter::Active).unwrap()[0];
+        assert_eq!(summary.post_count, 2);
+        assert_eq!(summary.excerpt, "answer");
+        let _ = answer;
+    });
+}
+
+#[test]
+fn a_deleted_discussion_disappears_everywhere() {
+    for_each_repo(|repo| {
+        let me = repo.local_user().unwrap();
+        let (d, root) = repo
+            .start_discussion("Private", me.id, "secret", at(0, 0))
+            .unwrap();
+        repo.edit_post(root.id, me.id, "more secret", UnixMillis(T0 + 1))
+            .unwrap();
+        repo.save_draft(d.id, None, "draft", UnixMillis(T0))
+            .unwrap();
+
+        repo.delete_discussion(d.id, UnixMillis(T0 + MINUTE))
+            .unwrap();
+
+        assert!(
+            repo.list_discussions(DiscussionFilter::Active)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            repo.list_discussions(DiscussionFilter::Archived)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(repo.get_discussion(d.id), Err(Error::NotFound(_))));
+        assert!(matches!(
+            repo.add_post(d.id, None, me.id, "x", at(2, 0)),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.rename_discussion(d.id, "x", UnixMillis(T0)),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            repo.delete_discussion(d.id, UnixMillis(T0)),
+            Err(Error::NotFound(_))
+        ));
     });
 }

@@ -19,6 +19,7 @@ const parent: Post = {
   createdAt: 0,
   tzOffsetMinutes: 0,
   editedAt: null,
+  deletedAt: null,
   status: "complete",
 };
 

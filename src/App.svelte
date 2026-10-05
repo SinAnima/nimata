@@ -8,6 +8,7 @@
   import Stream from "./lib/components/Stream.svelte";
   import NewDiscussion from "./lib/components/NewDiscussion.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
+  import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
 
   let settings: SettingsDialog | undefined = $state();
 
@@ -57,6 +58,12 @@
       const el = next ? document.getElementById(`post-${next}`) : null;
       el?.focus({ preventScroll: true });
       el?.scrollIntoView({ block: "nearest" });
+    } else if (key === "e" && notebook.view) {
+      const id = focusedPostId();
+      const post = notebook.view.posts.find((p) => p.id === id);
+      if (!post || post.authorId !== notebook.me?.id || post.deletedAt) return;
+      event.preventDefault();
+      notebook.editingPostId = post.id;
     } else if (key === "r" && notebook.view) {
       const id = focusedPostId();
       if (!id) return;
@@ -76,9 +83,17 @@
       <h1 class="font-serif text-2xl">Nimata cannot open your discussions</h1>
       <p class="mt-3 leading-relaxed">{notebook.fatal}</p>
       <p class="mt-3 text-sm text-muted">
-        Nothing has been changed or deleted. Quit Nimata and check that the
-        database file is readable, then reopen it.
+        Nothing has been changed or deleted. If you have a backup, you can
+        restore it now; the current file is kept beside it, renamed, in case it
+        can be recovered later.
       </p>
+      <button
+        type="button"
+        class="mt-4 min-h-10 rounded bg-accent px-4 text-sm font-medium text-surface"
+        onclick={() => notebook.restore()}
+      >
+        Restore from backup…
+      </button>
     </div>
   </div>
 {:else}
@@ -106,6 +121,21 @@
         nav.screen === "discussions" && "max-md:hidden",
       ]}
     >
+      {#if notebook.status}
+        <div
+          role="status"
+          class="flex items-start gap-3 border-b border-rule bg-accent-soft px-5 py-2 text-sm sm:px-8"
+        >
+          <p class="flex-1 break-all">{notebook.status}</p>
+          <button
+            type="button"
+            class="rounded px-1 font-medium"
+            onclick={() => (notebook.status = null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      {/if}
       {#if notebook.notice}
         <div
           role="alert"
@@ -147,3 +177,4 @@
 {/if}
 
 <SettingsDialog bind:this={settings} />
+<ConfirmDialog />

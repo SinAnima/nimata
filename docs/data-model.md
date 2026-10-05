@@ -11,12 +11,17 @@ readable with ordinary tools such as the `sqlite3` command-line shell:
 - A post's original UTC offset is stored next to its instant, in minutes
   east of UTC, so the author's wall-clock time can always be shown exactly.
 
-The schema version is `PRAGMA user_version`. Migrations live in
+The schema version is `PRAGMA user_version`; Nimata databases also carry
+`PRAGMA application_id = 1313426753` ("NIMA"). Migrations live in
 `crates/nimata-core/migrations/` and run in order, each in its own
-transaction. Nimata refuses to open a database from a newer version rather
-than risk damaging it.
+transaction. Nimata refuses to open a database from a newer version, a
+damaged database, or a SQLite file that is not a Nimata database, rather
+than risk changing it.
 
-## Tables (schema version 1)
+Migration tests load frozen databases from earlier versions
+(`crates/nimata-core/tests/fixtures/`) and check that nothing is lost.
+
+## Tables (schema version 2)
 
 ### participants
 
@@ -39,26 +44,37 @@ than risk damaging it.
 | updated_at  | time of the latest post; orders the discussion list |
 | archived_at | set while archived, null otherwise                  |
 | pinned_at   | reserved for pinning                                |
+| deleted_at  | set when deleted; the row stays as a tombstone      |
+| modified_at | last change of any kind, for future sync            |
 
 Renaming or archiving does not change `updated_at`: the discussion list is
 ordered by conversation activity, not by bookkeeping.
 
 ### posts
 
-| column                 | meaning                                    |
-| ---------------------- | ------------------------------------------ |
-| id                     | UUIDv7                                     |
-| discussion_id          | the discussion the post belongs to         |
-| parent_id              | the post this one replies to, if any       |
-| author_id              | participant who wrote it                   |
-| body                   | text as written                            |
-| created_at             | UTC instant, never rewritten               |
-| tz_offset_minutes      | author's UTC offset when writing           |
-| edited_at              | reserved for edits (Stage 2)               |
-| status                 | `complete`; model replies add other states |
-| provider_metadata_json | provider details for model posts (Stage 3) |
+| column                 | meaning                                        |
+| ---------------------- | ---------------------------------------------- |
+| id                     | UUIDv7                                         |
+| discussion_id          | the discussion the post belongs to             |
+| parent_id              | the post this one replies to, if any           |
+| author_id              | participant who wrote it                       |
+| body                   | text as written                                |
+| created_at             | UTC instant, never rewritten                   |
+| tz_offset_minutes      | author's UTC offset when writing               |
+| edited_at              | when the text was last changed                 |
+| deleted_at             | set when deleted; the row stays as a tombstone |
+| modified_at            | last change of any kind, for future sync       |
+| status                 | `complete`; model replies add other states     |
+| provider_metadata_json | provider details for model posts (Stage 3)     |
 
-Rules enforced on every write:
+Rules enforced on every write. The ones marked (schema) are triggers in the
+database itself, so they hold even for changes made outside Nimata's code:
+
+- A post's ID, discussion, parent, author, creation time, and UTC offset
+  never change after it is written (schema). The same applies to a
+  discussion's ID and creation time.
+- A deleted post cannot be replied to or edited.
+- Only a post's author can edit or delete it.
 
 - A reply's parent must be a post in the same discussion.
 - A post must contain text. Surrounding blank lines are removed. Other
@@ -75,3 +91,62 @@ does not adjust it.
 One unsent post per discussion: `body`, the `parent_id` it would reply to,
 and `updated_at`. A draft with no text and no reply target is deleted.
 Posting deletes the draft in the same transaction.
+
+### post_revisions
+
+Earlier versions of edited posts. Editing a post moves its current text
+here before replacing it, so history is never silently rewritten.
+
+| column      | meaning                               |
+| ----------- | ------------------------------------- |
+| id          | UUIDv7                                |
+| post_id     | the edited post                       |
+| body        | the text before the edit              |
+| written_at  | when that text became the post's body |
+| replaced_at | when the edit replaced it             |
+
+Revisions cannot be modified (schema). They are erased together with their
+post when the post is deleted.
+
+### attachments
+
+Metadata for files attached to posts. The table exists from schema version
+2; storing and showing files arrives in Stage 8.
+
+| column       | meaning                                      |
+| ------------ | -------------------------------------------- |
+| id           | UUIDv7                                       |
+| post_id      | the post the file is attached to             |
+| filename     | original file name                           |
+| media_type   | e.g. `text/markdown`                         |
+| size         | bytes                                        |
+| content_hash | `sha256:<hex>`; identical files share a hash |
+| local_uri    | where the file is stored on this device      |
+| created_at   | when it was attached                         |
+| deleted_at   | tombstone                                    |
+
+## Deletion
+
+Deleting never removes rows; it leaves tombstones, so a future sync can tell
+other devices about the deletion instead of the record reappearing.
+
+- **A post**: its text and revisions are erased and `deleted_at` is set. It
+  keeps its place in the thread, so replies to it still make sense; the UI
+  shows "This post was deleted."
+- **A discussion**: its title, every post's text, the revisions, and the
+  draft are erased, and `deleted_at` is set. It no longer appears anywhere.
+
+## Backup and restore
+
+A backup is a single SQLite file written with SQLite's online backup, so it
+is consistent even while Nimata is running. It is verified before it is
+moved into place under the chosen name.
+
+Restoring checks that the file is an undamaged Nimata database from this or
+an earlier version, keeps a safety copy of the current data in the
+`safety-copies` folder inside the data folder, replaces the data, and
+migrates it if it came from an older version.
+
+If the database cannot be opened at startup (damaged, or not a Nimata
+database), Nimata says why and offers to restore a backup. The unusable file
+is kept beside the new one with a `.damaged-<time>` suffix, never deleted.

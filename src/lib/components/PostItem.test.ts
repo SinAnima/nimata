@@ -21,6 +21,7 @@ function post(id: string, body: string, parentId: string | null): Post {
     createdAt: Date.UTC(2026, 9, 4, 16, 41),
     tzOffsetMinutes: -240,
     editedAt: null,
+    deletedAt: null,
     status: "complete",
   };
 }
@@ -42,8 +43,14 @@ function renderReply(quoteParent: boolean, onShowParent = vi.fn()) {
     now: Date.UTC(2026, 9, 4, 18, 0),
     flashing: false,
     isReplyTarget: false,
+    isMine: false,
+    editing: false,
     onReply: vi.fn(),
     onShowParent,
+    onStartEdit: vi.fn(),
+    onCancelEdit: vi.fn(),
+    onSaveEdit: vi.fn(),
+    onDelete: vi.fn(),
   });
   return onShowParent;
 }
@@ -63,9 +70,7 @@ describe("PostItem", () => {
 
   it("shows the author's exact wall-clock time on request", async () => {
     renderReply(false);
-    await fireEvent.click(
-      screen.getByRole("button", { name: "Show exact time" }),
-    );
+    await fireEvent.click(screen.getByRole("button", { name: "Show details" }));
     expect(screen.getByText("2026-10-04 12:41:00 UTC-04:00")).toBeTruthy();
   });
 });

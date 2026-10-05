@@ -54,7 +54,27 @@ pub struct Post {
     /// The author's UTC offset in minutes when the post was written.
     pub tz_offset_minutes: i32,
     pub edited_at: Option<UnixMillis>,
+    /// Set when the post was deleted. The post stays as a tombstone so the
+    /// thread keeps its shape; its body is erased.
+    pub deleted_at: Option<UnixMillis>,
     pub status: PostStatus,
+}
+
+impl Post {
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+}
+
+/// An earlier version of an edited post: the text it had from `written_at`
+/// until an edit replaced it at `replaced_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Revision {
+    pub post_id: Uuid,
+    pub body: String,
+    pub written_at: UnixMillis,
+    pub replaced_at: UnixMillis,
 }
 
 /// A discussion as shown in the sidebar.
@@ -192,6 +212,7 @@ mod tests {
             created_at: UnixMillis(1_700_000_000_000),
             tz_offset_minutes: -240,
             edited_at: None,
+            deleted_at: None,
             status: PostStatus::Complete,
         };
         let json = serde_json::to_value(&post).unwrap();

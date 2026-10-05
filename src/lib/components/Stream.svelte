@@ -22,6 +22,13 @@
   const replyTo = $derived(notebook.composers.get(view.discussion.id).replyTo);
   const archived = $derived(view.discussion.archivedAt !== null);
 
+  let menuOpen = $state(false);
+
+  function menuAction(action: () => Promise<void>): void {
+    menuOpen = false;
+    void action();
+  }
+
   let flashingId: Uuid | null = $state(null);
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -74,13 +81,40 @@
           : ""}
       </p>
     </div>
-    <button
-      type="button"
-      class="ml-auto min-h-10 shrink-0 rounded px-2 text-sm text-muted hover:text-ink"
-      onclick={() => notebook.setArchived(!archived)}
-    >
-      {archived ? "Unarchive" : "Archive"}
-    </button>
+    <details class="relative ml-auto shrink-0" bind:open={menuOpen}>
+      <summary
+        class="flex min-h-10 cursor-pointer list-none items-center rounded px-2 text-sm text-muted hover:text-ink [&::-webkit-details-marker]:hidden"
+      >
+        More
+      </summary>
+      <div
+        class="absolute right-0 z-10 mt-1 w-56 rounded-md border border-rule bg-surface py-1 shadow-lg"
+        role="group"
+        aria-label="Discussion actions"
+      >
+        <button
+          type="button"
+          class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
+          onclick={() => menuAction(() => notebook.exportDiscussion())}
+        >
+          Export as JSON…
+        </button>
+        <button
+          type="button"
+          class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
+          onclick={() => menuAction(() => notebook.setArchived(!archived))}
+        >
+          {archived ? "Unarchive" : "Archive"}
+        </button>
+        <button
+          type="button"
+          class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
+          onclick={() => menuAction(() => notebook.deleteDiscussion())}
+        >
+          Delete discussion…
+        </button>
+      </div>
+    </details>
   </header>
 
   <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
@@ -103,8 +137,14 @@
             now={clock.now}
             flashing={flashingId === post.id}
             isReplyTarget={replyTo === post.id}
+            isMine={post.authorId === notebook.me?.id}
+            editing={notebook.editingPostId === post.id}
             onReply={() => reply(post.id)}
             onShowParent={() => parent && showPost(parent.id)}
+            onStartEdit={() => (notebook.editingPostId = post.id)}
+            onCancelEdit={() => (notebook.editingPostId = null)}
+            onSaveEdit={(body) => notebook.editPost(post.id, body)}
+            onDelete={() => notebook.deletePost(post.id)}
           />
         </li>
       {/each}
