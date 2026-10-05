@@ -35,28 +35,49 @@ npm run tauri ios dev             # iOS simulator
 npm run tauri android dev         # Android emulator or device
 ```
 
-## Checks
+## Running tests
 
-Run all of these before considering a change done:
+All commands run from the repository root. If your shell does not activate
+mise automatically, prefix them with `mise exec --`, for example
+`mise exec -- npm test`.
+
+| What                                | Command                                                         |
+| ----------------------------------- | --------------------------------------------------------------- |
+| Rust tests                          | `cargo test --workspace`                                        |
+| Frontend tests                      | `npm test`                                                      |
+| Frontend tests, re-running on save  | `npx vitest`                                                    |
+| One test file                       | `npx vitest run src/App.test.ts`                                |
+| Tests whose name matches            | `npx vitest run -t "drafts"`                                    |
+| One Rust test                       | `cargo test --workspace drafts`                                 |
+| Rust coverage, CI minimum           | `cargo llvm-cov --workspace --fail-under-lines 90`              |
+| Frontend coverage, CI minimums      | `npm run coverage`                                              |
+| Rust coverage report in the browser | `cargo llvm-cov --workspace --open`                             |
+| Frontend coverage report            | `npm run coverage`, then open `coverage/lcov-report/index.html` |
+
+The coverage minimums are Rust lines 90%, and frontend lines 90%,
+statements 90%, functions 85%, and branches 70%. The frontend thresholds
+live in `vite.config.ts`. `cargo-llvm-cov` comes from mise.
+
+## Checks before committing
+
+This is the sequence CI runs. Run it before considering a change done:
 
 ```sh
+npm run build                                       # frontend build, needed by the Rust crate
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-npm run check            # svelte-check with strict TypeScript
-npm run format:check     # prettier
-npm test                 # vitest
-npm run tauri build -- --debug
+cargo llvm-cov --workspace --fail-under-lines 90    # Rust tests with coverage
+npm run check                                       # svelte-check with strict TypeScript
+npm run format:check                                # prettier
+npm run coverage                                    # frontend tests with coverage
+actionlint                                          # GitHub workflow files
 ```
 
-Coverage, with the same minimums CI enforces:
+A desktop build confirms packaging still works:
 
 ```sh
-cargo llvm-cov --workspace --fail-under-lines 90   # Rust, needs cargo-llvm-cov from mise
-npm run coverage                                   # frontend, thresholds in vite.config.ts
+npm run tauri build -- --debug
 ```
-
-`actionlint` (also from mise) checks the GitHub workflow files.
 
 Mobile build validation:
 
@@ -110,7 +131,25 @@ sqlite3 -readonly ~/Library/Application\ Support/org.nimata.app/nimata.sqlite3
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request on Ubuntu:
-formatting, clippy, Rust tests with coverage, type checking, Prettier, and
-frontend tests with coverage. Coverage reports are uploaded as a build
-artifact. Releases are described in [release.md](release.md).
+`.github/workflows/ci.yml` runs on every branch push and pull request, on
+Ubuntu: formatting, clippy, Rust tests with coverage, type checking,
+Prettier, and frontend tests with coverage. Coverage reports are attached to
+each run as an artifact named `coverage`.
+
+Pushing a branch is therefore enough to test CI. To follow it from the
+terminal:
+
+```sh
+gh run list --branch "$(git branch --show-current)"
+gh run watch                       # pick the run to follow live
+gh run view --log-failed           # logs of failed steps for the latest run
+```
+
+To start CI by hand without pushing new commits:
+
+```sh
+gh workflow run CI --ref "$(git branch --show-current)"
+```
+
+Releases, and how to test the release builds before tagging, are described
+in [release.md](release.md).
