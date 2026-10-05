@@ -37,10 +37,11 @@
 
 <article
   id="post-{post.id}"
+  data-post-id={post.id}
   tabindex="-1"
   aria-label="{name}, {friendlyTime(post.createdAt, now)}"
   class={[
-    "scroll-mt-4 border-b border-rule px-5 pt-3.5 pb-4 transition-colors duration-700 outline-none sm:px-8",
+    "scroll-my-4 border-b border-rule px-5 pt-3.5 pb-4 transition-colors duration-700 outline-none focus:bg-accent-soft/50 sm:px-8",
     flashing && "bg-flash duration-150",
     isReplyTarget && "shadow-[inset_3px_0_0_var(--accent)]",
   ]}

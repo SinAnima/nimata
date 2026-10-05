@@ -70,9 +70,24 @@ docs/                 architecture, decisions
 
 ## Testing approach
 
-- Rust unit tests cover domain rules and fixture invariants.
-- Vitest covers stream ordering, reply references, time formatting, and
-  navigation state, with components rendered in jsdom.
+- Rust unit tests cover domain rules.
+- Repository contract tests (`crates/nimata-core/tests/`) run every case
+  against both an in-memory and an on-disk database, including reopening
+  and schema version handling.
+- IPC tests (`src-tauri/src/ipc_tests.rs`) call commands through Tauri's
+  mock runtime with the same JSON the UI sends.
+- Vitest covers stream ordering, reply references, time formatting,
+  navigation, draft saving, keyboard navigation, and the composer, with
+  components rendered in jsdom.
 - Tauri's WebDriver tooling does not support macOS, so end-to-end flows are
-  covered by Rust integration tests (from Stage 1 on), component tests with
-  mocked IPC, and the scripted demo for each stage.
+  covered by the layers above plus the scripted demo for each stage.
+
+## Inspecting local data
+
+The database lives in the app data folder. On macOS that is
+`~/Library/Application Support/org.nimata.app/nimata.sqlite3`. Settings in
+the app shows the exact path. To look without risking changes:
+
+```sh
+sqlite3 -readonly ~/Library/Application\ Support/org.nimata.app/nimata.sqlite3
+```
