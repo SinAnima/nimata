@@ -40,6 +40,18 @@ if [ ! -d node_modules ]; then
   exit 1
 fi
 
+# TypeScript and Node also resolve packages from node_modules folders in
+# parent directories. A dependency found there makes a check pass locally but
+# fail on a clean CI checkout, so point it out.
+dir="$(dirname "$PWD")"
+while [ "$dir" != "/" ]; do
+  if [ -d "$dir/node_modules" ]; then
+    printf '\033[1;33mWarning:\033[0m %s/node_modules exists. Packages there can hide a\n' "$dir"
+    printf 'missing dependency here; CI will not have them.\n'
+  fi
+  dir="$(dirname "$dir")"
+done
+
 # Fast checks first, so simple mistakes fail within seconds.
 step "Rust formatting" cargo fmt --all --check
 step "Frontend formatting" npm run --silent format:check
