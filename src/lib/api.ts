@@ -18,6 +18,7 @@ import type {
   Participant,
   Post,
   Revision,
+  SentContext,
   UnixMillis,
   Uuid,
 } from "./types";
@@ -59,8 +60,9 @@ export function addPost(
   discussionId: Uuid,
   parentId: Uuid | null,
   body: string,
+  contextIds: Uuid[] = [],
 ): Promise<Post> {
-  return invoke("add_post", { discussionId, parentId, body });
+  return invoke("add_post", { discussionId, parentId, body, contextIds });
 }
 
 export function renameDiscussion(id: Uuid, title: string): Promise<Discussion> {
@@ -75,8 +77,30 @@ export function saveDraft(
   discussionId: Uuid,
   parentId: Uuid | null,
   body: string,
+  contextIds: Uuid[] = [],
 ): Promise<void> {
-  return invoke("save_draft", { discussionId, parentId, body });
+  return invoke("save_draft", { discussionId, parentId, body, contextIds });
+}
+
+/**
+ * Exactly what a model would be sent. With `draft`, as if the draft were
+ * posted (replying to `parentId`, with `contextIds`) and the model then
+ * asked; without, as if asked to reply to `parentId` now.
+ */
+export function previewContext(
+  discussionId: Uuid,
+  parentId: Uuid,
+  participantId: Uuid,
+  draft: string | null,
+  contextIds: Uuid[] = [],
+): Promise<SentContext> {
+  return invoke("preview_context", {
+    discussionId,
+    parentId,
+    participantId,
+    draft,
+    contextIds,
+  });
 }
 
 export function editPost(postId: Uuid, body: string): Promise<Post> {

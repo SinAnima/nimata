@@ -26,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_history_and_tombstones.sql"),
     include_str!("../migrations/0003_model_participants.sql"),
     include_str!("../migrations/0004_aliases_and_settings.sql"),
+    include_str!("../migrations/0005_context_references.sql"),
 ];
 
 const DEFAULT_MODEL_SETTING: &str = "default_model";
@@ -119,14 +120,56 @@ impl SqliteRepository {
     }
 
     fn post(&self, id: Uuid) -> Result<Post> {
-        self.conn
+        let mut post = self
+            .conn
             .query_row(
                 &format!("SELECT {POST_COLUMNS} FROM posts WHERE id = ?1"),
                 [id.to_string()],
                 post_from_row,
             )
             .optional()?
-            .ok_or(Error::NotFound("post"))
+            .ok_or(Error::NotFound("post"))?;
+        post.context_ids = self.context_ids(id)?;
+        Ok(post)
+    }
+
+    fn context_ids(&self, post_id: Uuid) -> Result<Vec<Uuid>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT ref_post_id FROM context_refs WHERE post_id = ?1 ORDER BY position",
+        )?;
+        let rows = stmt.query_map([post_id.to_string()], |row| uuid_at(row, 0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Checks context references for a post in `discussion_id`, keeping each
+    /// once and dropping the post being replied to.
+    fn clean_context(
+        &self,
+        discussion_id: Uuid,
+        parent_id: Option<Uuid>,
+        context_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        let mut cleaned = Vec::new();
+        for &id in context_ids {
+            if Some(id) == parent_id || cleaned.contains(&id) {
+                continue;
+            }
+            let post = self
+                .post(id)
+                .map_err(|_| Error::NotFound("post chosen as context"))?;
+            if post.discussion_id != discussion_id {
+                return Err(Error::Invalid(
+                    "context can only come from the same discussion".into(),
+                ));
+            }
+            if post.deleted_at.is_some() {
+                return Err(Error::Invalid(
+                    "a deleted post cannot be used as context".into(),
+                ));
+            }
+            cleaned.push(id);
+        }
+        Ok(cleaned)
     }
 
     fn participant(&self, id: Uuid) -> Result<Participant> {
@@ -286,6 +329,7 @@ fn insert_post_with_status(
         deleted_at: None,
         status,
         provider_metadata: None,
+        context_ids: vec![],
     };
     conn.execute(
         "INSERT INTO posts (id, discussion_id, parent_id, author_id, body, created_at,
@@ -441,9 +485,24 @@ impl Repository for SqliteRepository {
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {POST_COLUMNS} FROM posts WHERE discussion_id = ?1 ORDER BY created_at, rowid"
         ))?;
-        let posts = stmt
+        let mut posts = stmt
             .query_map([id.to_string()], post_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut refs: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.post_id, r.ref_post_id FROM context_refs r
+             JOIN posts p ON p.id = r.post_id
+             WHERE p.discussion_id = ?1 ORDER BY r.post_id, r.position",
+        )?;
+        for row in stmt.query_map([id.to_string()], |row| {
+            Ok((uuid_at(row, 0)?, uuid_at(row, 1)?))
+        })? {
+            let (post_id, ref_id) = row?;
+            refs.entry(post_id).or_default().push(ref_id);
+        }
+        for post in &mut posts {
+            post.context_ids = refs.remove(&post.id).unwrap_or_default();
+        }
 
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, kind, display_name, provider, model FROM participants
@@ -457,7 +516,7 @@ impl Repository for SqliteRepository {
         let draft = self
             .conn
             .query_row(
-                "SELECT discussion_id, parent_id, body, updated_at FROM drafts
+                "SELECT discussion_id, parent_id, body, updated_at, context_ids FROM drafts
                  WHERE discussion_id = ?1",
                 [id.to_string()],
                 |row| {
@@ -466,6 +525,7 @@ impl Repository for SqliteRepository {
                         parent_id: opt_uuid_at(row, 1)?,
                         body: row.get(2)?,
                         updated_at: UnixMillis(row.get(3)?),
+                        context_ids: json_at(row, 4)?,
                     })
                 },
             )
@@ -479,15 +539,17 @@ impl Repository for SqliteRepository {
         })
     }
 
-    fn add_post(
+    fn add_post_with_context(
         &mut self,
         discussion_id: Uuid,
         parent_id: Option<Uuid>,
         author_id: Uuid,
         body: &str,
+        context_ids: &[Uuid],
         at: Timestamp,
     ) -> Result<Post> {
         let body = clean_body(body)?;
+        let context_ids = self.clean_context(discussion_id, parent_id, context_ids)?;
         let tx = self.conn.transaction()?;
         check_discussion(&tx, discussion_id)?;
         let Some(parent_id) = parent_id else {
@@ -497,7 +559,14 @@ impl Repository for SqliteRepository {
         };
         check_parent(&tx, discussion_id, parent_id)?;
         let parent_id = Some(parent_id);
-        let post = insert_post(&tx, discussion_id, parent_id, author_id, body, at)?;
+        let mut post = insert_post(&tx, discussion_id, parent_id, author_id, body, at)?;
+        for (position, id) in context_ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO context_refs (post_id, ref_post_id, position) VALUES (?1, ?2, ?3)",
+                params![post.id.to_string(), id.to_string(), position as i64],
+            )?;
+        }
+        post.context_ids = context_ids;
         tx.execute(
             "UPDATE discussions
              SET updated_at = max(updated_at, ?2), modified_at = max(modified_at, ?2)
@@ -1030,6 +1099,7 @@ impl Repository for SqliteRepository {
             context_post_ids: context_post_ids.to_vec(),
             started_at: at.at,
             finished_at: None,
+            sent: None,
         };
         tx.execute(
             "INSERT INTO generations
@@ -1192,14 +1262,33 @@ impl Repository for SqliteRepository {
         Ok(count)
     }
 
-    fn save_draft(
+    fn record_sent(
+        &mut self,
+        generation_id: Uuid,
+        sent: &crate::context::SentContext,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE generations SET sent_json = ?2 WHERE id = ?1",
+            params![
+                generation_id.to_string(),
+                serde_json::to_string(sent).expect("context always serializes")
+            ],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound("reply"));
+        }
+        Ok(())
+    }
+
+    fn save_draft_with_context(
         &mut self,
         discussion_id: Uuid,
         parent_id: Option<Uuid>,
         body: &str,
+        context_ids: &[Uuid],
         at: UnixMillis,
     ) -> Result<Option<Draft>> {
-        if body.trim().is_empty() && parent_id.is_none() {
+        if body.trim().is_empty() && parent_id.is_none() && context_ids.is_empty() {
             self.conn.execute(
                 "DELETE FROM drafts WHERE discussion_id = ?1",
                 [discussion_id.to_string()],
@@ -1210,17 +1299,24 @@ impl Repository for SqliteRepository {
         if let Some(parent_id) = parent_id {
             check_parent(&self.conn, discussion_id, parent_id)?;
         }
+        // Context chosen earlier may since have been deleted; keep the rest.
+        let context_ids: Vec<Uuid> = context_ids
+            .iter()
+            .copied()
+            .filter(|id| self.clean_context(discussion_id, None, &[*id]).is_ok())
+            .collect();
         self.conn.execute(
-            "INSERT INTO drafts (discussion_id, parent_id, body, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO drafts (discussion_id, parent_id, body, updated_at, context_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT (discussion_id) DO UPDATE
              SET parent_id = excluded.parent_id, body = excluded.body,
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, context_ids = excluded.context_ids",
             params![
                 discussion_id.to_string(),
                 parent_id.map(|id| id.to_string()),
                 body,
-                at.0
+                at.0,
+                serde_json::to_string(&context_ids).expect("UUIDs always serialize")
             ],
         )?;
         Ok(Some(Draft {
@@ -1228,6 +1324,7 @@ impl Repository for SqliteRepository {
             parent_id,
             body: body.to_string(),
             updated_at: at,
+            context_ids,
         }))
     }
 }
@@ -1237,8 +1334,16 @@ const POST_COLUMNS: &str = "id, discussion_id, parent_id, author_id, body, creat
 
 const PROVIDER_COLUMNS: &str = "id, kind, display_name, base_url";
 
-const GENERATION_COLUMNS: &str =
-    "id, post_id, participant_id, status, error, context_post_ids, started_at, finished_at";
+const GENERATION_COLUMNS: &str = "id, post_id, participant_id, status, error, context_post_ids, \
+     started_at, finished_at, sent_json";
+
+/// Reads a JSON column.
+fn json_at<T: serde::de::DeserializeOwned>(row: &Row, idx: usize) -> rusqlite::Result<T> {
+    let text: String = row.get(idx)?;
+    serde_json::from_str(&text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(idx, rusqlite::types::Type::Text, e.into())
+    })
+}
 
 fn provider_from_row(row: &Row) -> rusqlite::Result<ProviderConfig> {
     let kind = match row.get::<_, String>(1)?.as_str() {
@@ -1289,6 +1394,10 @@ fn generation_from_row(row: &Row) -> rusqlite::Result<Generation> {
         context_post_ids,
         started_at: UnixMillis(row.get(6)?),
         finished_at: row.get::<_, Option<i64>>(7)?.map(UnixMillis),
+        sent: match row.get::<_, Option<String>>(8)? {
+            None => None,
+            Some(_) => Some(json_at(row, 8)?),
+        },
     })
 }
 
@@ -1390,6 +1499,8 @@ fn post_from_row(row: &Row) -> rusqlite::Result<Post> {
                 rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, e.into())
             })?),
         },
+        // Filled in by the caller; references live in their own table.
+        context_ids: Vec::new(),
     })
 }
 
@@ -1574,6 +1685,18 @@ mod tests {
         let (d, root) = repo.start_discussion("D", me.id, "root", at(0)).unwrap();
         repo.edit_post(root.id, me.id, "edited", UnixMillis(5))
             .unwrap();
+        let other = repo
+            .add_post(d.id, Some(root.id), me.id, "other", at(1))
+            .unwrap();
+        repo.add_post_with_context(
+            d.id,
+            Some(root.id),
+            me.id,
+            "with context",
+            &[other.id],
+            at(2),
+        )
+        .unwrap();
 
         for sql in [
             "UPDATE posts SET created_at = 0",
@@ -1582,6 +1705,7 @@ mod tests {
             "UPDATE posts SET author_id = 'someone'",
             "UPDATE discussions SET created_at = 0",
             "UPDATE post_revisions SET body = 'rewritten'",
+            "UPDATE context_refs SET position = 9",
         ] {
             let error = repo.conn.execute(sql, []).unwrap_err().to_string();
             assert!(error.contains("cannot"), "{sql}: {error}");

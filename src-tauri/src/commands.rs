@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 use nimata_core::archive::DiscussionArchive;
+use nimata_core::context::SentContext;
+use nimata_core::domain::PostStatus;
 use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
 use nimata_core::providers::{Capabilities, ModelInfo, capabilities};
 use nimata_core::{
@@ -84,18 +86,26 @@ pub fn start_discussion(
     repo.get_discussion(discussion.id).map_err(text)
 }
 
-/// Adds a post by the local user.
+/// Adds a post by the local user, with any posts chosen as context.
 #[tauri::command]
 pub fn add_post(
     discussion_id: Uuid,
     parent_id: Option<Uuid>,
     body: String,
+    context_ids: Option<Vec<Uuid>>,
     state: State<'_, AppState>,
 ) -> CommandResult<Post> {
     let mut repo = state.repo()?;
     let me = repo.local_user().map_err(text)?;
-    repo.add_post(discussion_id, parent_id, me.id, &body, Timestamp::now())
-        .map_err(text)
+    repo.add_post_with_context(
+        discussion_id,
+        parent_id,
+        me.id,
+        &body,
+        &context_ids.unwrap_or_default(),
+        Timestamp::now(),
+    )
+    .map_err(text)
 }
 
 #[tauri::command]
@@ -127,11 +137,18 @@ pub fn save_draft(
     discussion_id: Uuid,
     parent_id: Option<Uuid>,
     body: String,
+    context_ids: Option<Vec<Uuid>>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     state
         .repo()?
-        .save_draft(discussion_id, parent_id, &body, UnixMillis::now())
+        .save_draft_with_context(
+            discussion_id,
+            parent_id,
+            &body,
+            &context_ids.unwrap_or_default(),
+            UnixMillis::now(),
+        )
         .map(|_| ())
         .map_err(text)
 }
@@ -518,4 +535,51 @@ pub fn set_default_model(
         .repo()?
         .set_default_model(participant_id)
         .map_err(text)
+}
+
+/// Exactly what a model would be sent if asked now. With `draft`, it shows
+/// what posting the draft (replying to `parent_id`, with `context_ids`) and
+/// then asking the model would send; without, what asking the model to
+/// reply to `parent_id` would send.
+#[tauri::command]
+pub fn preview_context(
+    discussion_id: Uuid,
+    parent_id: Uuid,
+    participant_id: Uuid,
+    draft: Option<String>,
+    context_ids: Option<Vec<Uuid>>,
+    state: State<'_, AppState>,
+) -> CommandResult<SentContext> {
+    let mut repo = state.repo()?;
+    let model = repo
+        .model_participants()
+        .map_err(text)?
+        .into_iter()
+        .find(|m| m.participant.id == participant_id)
+        .ok_or("this model is no longer set up in Settings")?;
+    let Some(body) = draft else {
+        return generation::context_for(&mut *repo, discussion_id, parent_id, &model, None);
+    };
+    let me = repo.local_user().map_err(text)?;
+    let now = Timestamp::now();
+    let unsent = Post {
+        id: Uuid::now_v7(),
+        discussion_id,
+        parent_id: Some(parent_id),
+        author_id: me.id,
+        body: if body.trim().is_empty() {
+            "(your post)".into()
+        } else {
+            body.trim().into()
+        },
+        created_at: now.at,
+        tz_offset_minutes: now.offset_minutes,
+        edited_at: None,
+        deleted_at: None,
+        status: PostStatus::Complete,
+        provider_metadata: None,
+        context_ids: context_ids.unwrap_or_default(),
+    };
+    let target = unsent.id;
+    generation::context_for(&mut *repo, discussion_id, target, &model, Some(unsent))
 }

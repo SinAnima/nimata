@@ -66,6 +66,11 @@
       if (!post || post.authorId !== notebook.me?.id || post.deletedAt) return;
       event.preventDefault();
       notebook.editingPostId = post.id;
+    } else if (key === "c" && notebook.view) {
+      const id = focusedPostId();
+      if (!id) return;
+      event.preventDefault();
+      notebook.composers.toggleContext(notebook.view.discussion.id, id);
     } else if (key === "r" && notebook.view) {
       const id = focusedPostId();
       if (!id) return;

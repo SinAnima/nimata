@@ -11,6 +11,7 @@
   import { notebook } from "../stores/notebook.svelte";
   import PostItem from "./PostItem.svelte";
   import Composer from "./Composer.svelte";
+  import ContextDialog from "./ContextDialog.svelte";
   import DiscussionTitle from "./DiscussionTitle.svelte";
 
   let { view, onBack }: { view: DiscussionView; onBack: () => void } = $props();
@@ -19,6 +20,9 @@
   const postsById = $derived(indexById(view.posts));
   const participantsById = $derived(indexById(view.participants));
   const nameOf = (id: Uuid) => authorName(participantsById, id);
+  const composerContext = $derived(
+    notebook.composers.get(view.discussion.id).context,
+  );
   const replyTo = $derived(notebook.composers.get(view.discussion.id).replyTo);
   const archived = $derived(view.discussion.archivedAt !== null);
 
@@ -151,11 +155,30 @@
             onAsk={(participantId) => notebook.askModel(post.id, participantId)}
             onStop={() => notebook.cancelReply(post.id)}
             onRetry={() => notebook.retryReply(post.id)}
+            included={composerContext.includes(post.id)}
+            onToggleInclude={() =>
+              notebook.composers.toggleContext(view.discussion.id, post.id)}
+            contextPosts={post.contextIds.flatMap((id) => {
+              const ref = postsById.get(id);
+              return ref
+                ? [
+                    {
+                      id,
+                      authorName: nameOf(ref.authorId),
+                      body: ref.body,
+                      deleted: ref.deletedAt !== null,
+                    },
+                  ]
+                : [];
+            })}
+            onShowPost={(id) => showPost(id)}
           />
         </li>
       {/each}
     </ol>
   </div>
+
+  <ContextDialog {postsById} {nameOf} />
 
   <Composer
     discussionId={view.discussion.id}

@@ -20,7 +20,12 @@ describe("Composers", () => {
     expect(save).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(SAVE_DELAY_MS);
-    expect(save).toHaveBeenCalledExactlyOnceWith("d1", "p1", "Half a thought");
+    expect(save).toHaveBeenCalledExactlyOnceWith(
+      "d1",
+      "p1",
+      "Half a thought",
+      [],
+    );
   });
 
   it("keeps drafts separate per discussion", () => {
@@ -36,9 +41,14 @@ describe("Composers", () => {
       parentId: "p1",
       body: "stored",
       updatedAt: 1,
+      contextIds: [],
     };
     composers.load("d1", stored);
-    expect(composers.get("d1")).toEqual({ replyTo: "p1", draft: "stored" });
+    expect(composers.get("d1")).toEqual({
+      replyTo: "p1",
+      draft: "stored",
+      context: [],
+    });
 
     composers.setDraft("d1", "newer");
     composers.load("d1", stored);
@@ -48,7 +58,7 @@ describe("Composers", () => {
   it("flush saves pending changes immediately", () => {
     composers.setDraft("d1", "unsaved");
     composers.flush();
-    expect(save).toHaveBeenCalledExactlyOnceWith("d1", null, "unsaved");
+    expect(save).toHaveBeenCalledExactlyOnceWith("d1", null, "unsaved", []);
     vi.advanceTimersByTime(SAVE_DELAY_MS);
     expect(save).toHaveBeenCalledOnce();
   });
@@ -58,6 +68,10 @@ describe("Composers", () => {
     composers.clear("d1");
     vi.advanceTimersByTime(SAVE_DELAY_MS);
     expect(save).not.toHaveBeenCalled();
-    expect(composers.get("d1")).toEqual({ replyTo: null, draft: "" });
+    expect(composers.get("d1")).toEqual({
+      replyTo: null,
+      draft: "",
+      context: [],
+    });
   });
 });

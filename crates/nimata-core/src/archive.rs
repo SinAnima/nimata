@@ -71,6 +71,9 @@ pub struct ArchivedPost {
     /// provider's own IDs, and token usage.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub provider_metadata: Option<ProviderMetadata>,
+    /// Other posts the author chose as context, besides the one replied to.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub context_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +161,7 @@ impl DiscussionArchive {
                         })
                         .collect(),
                     provider_metadata: p.provider_metadata.clone(),
+                    context_ids: p.context_ids.clone(),
                 })
                 .collect(),
         }
@@ -186,6 +190,12 @@ impl DiscussionArchive {
             {
                 return Err(Error::Invalid(format!(
                     "post {} replies to a missing post",
+                    post.id
+                )));
+            }
+            if post.context_ids.iter().any(|id| !post_ids.contains(id)) {
+                return Err(Error::Invalid(format!(
+                    "post {} refers to a missing post as context",
                     post.id
                 )));
             }
@@ -239,6 +249,7 @@ mod tests {
             deleted_at: deleted.map(UnixMillis),
             status: PostStatus::Complete,
             provider_metadata: None,
+            context_ids: vec![],
         };
         let root = post(
             None,

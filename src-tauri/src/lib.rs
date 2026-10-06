@@ -42,6 +42,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::add_endpoint,
         commands::update_endpoint,
         commands::remove_endpoint,
+        commands::preview_context,
     ])
 }
 

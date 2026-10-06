@@ -205,6 +205,16 @@ pub fn capabilities(kind: ProviderKind) -> Capabilities {
     }
 }
 
+/// How much context, in estimated tokens, Nimata sends to a model before
+/// trimming the middle of a long thread. Hosted models accept far more;
+/// local models often have small context windows.
+pub fn context_budget(kind: ProviderKind) -> u64 {
+    match kind {
+        ProviderKind::OpenAi | ProviderKind::Anthropic => 100_000,
+        ProviderKind::OpenAiCompatible => 6_000,
+    }
+}
+
 /// The error code and message from a provider's error body. Understands
 /// `{"error": {"message", "code"|"type"}}` (OpenAI, Anthropic, most
 /// OpenAI-compatible servers), `{"error": "text"}`, and `{"message": "text"}`.

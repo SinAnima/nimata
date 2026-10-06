@@ -227,3 +227,53 @@ fn a_version_3_database_upgrades_with_models_and_replies_intact() {
     repo.set_default_model(Some(gpt)).unwrap();
     assert_eq!(repo.default_model().unwrap(), Some(gpt));
 }
+
+#[test]
+fn a_version_4_database_upgrades_with_aliases_and_drafts_intact() {
+    let dir = TempDir::new().unwrap();
+    let path = database_from("tests/fixtures/schema_v4.sql", &dir);
+    let mut repo = SqliteRepository::open(&path).unwrap();
+
+    let models = repo.model_participants().unwrap();
+    assert_eq!(models[0].aliases, vec!["review", "r"]);
+    assert_eq!(
+        repo.default_model().unwrap(),
+        Some(models[0].participant.id)
+    );
+
+    let discussion = id("01a109a2-0000-7000-8000-000000000001");
+    let view = repo.get_discussion(discussion).unwrap();
+    let draft = view.draft.unwrap();
+    assert_eq!(draft.body, "Half a thought");
+    assert!(draft.context_ids.is_empty());
+    assert!(view.posts[0].context_ids.is_empty());
+
+    // Version 5 features work on the upgraded database.
+    let me = repo.local_user().unwrap().id;
+    let reply = repo
+        .add_post(
+            discussion,
+            Some(view.posts[0].id),
+            me,
+            "a sibling",
+            nimata_core::Timestamp {
+                at: UnixMillis(1_791_300_100_000),
+                offset_minutes: 0,
+            },
+        )
+        .unwrap();
+    let with_context = repo
+        .add_post_with_context(
+            discussion,
+            Some(view.posts[0].id),
+            me,
+            "with context",
+            &[reply.id],
+            nimata_core::Timestamp {
+                at: UnixMillis(1_791_300_200_000),
+                offset_minutes: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(with_context.context_ids, vec![reply.id]);
+}

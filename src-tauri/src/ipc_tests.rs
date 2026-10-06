@@ -648,6 +648,81 @@ mod replies {
         assert_eq!(providers.as_array().unwrap().len(), 2);
     }
 
+    /// The Stage 5 demo: reply to one branch while including its sibling as
+    /// context, preview what the model will get, then check it got exactly
+    /// that.
+    #[test]
+    fn the_preview_matches_what_the_model_is_sent() {
+        let base = serve(vec![Reply {
+            status: "200 OK",
+            body: RECORDED.into(),
+            hold: Duration::ZERO,
+        }]);
+        let s = setup(&base);
+        let add = |parent: &Value, body: &str, context: Value| {
+            invoke(
+                &s.w,
+                "add_post",
+                json!({ "discussionId": s.discussion, "parentId": parent, "body": body, "contextIds": context }),
+            )
+            .unwrap()
+        };
+        let left = add(&s.question, "Yes: replication.", json!([]));
+        let right = add(&s.question, "No: mobile changes it.", json!([]));
+
+        let preview = invoke(
+            &s.w,
+            "preview_context",
+            json!({
+                "discussionId": s.discussion, "parentId": left["id"], "participantId": s.model,
+                "draft": "Weigh both.", "contextIds": [right["id"]]
+            }),
+        )
+        .unwrap();
+        let summary = |sent: &Value| -> Vec<(String, String)> {
+            sent["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| {
+                    (
+                        m["source"].as_str().unwrap().into(),
+                        m["text"].as_str().unwrap().into(),
+                    )
+                })
+                .collect()
+        };
+        let expected = vec![
+            (
+                "thread".to_string(),
+                "Me:\nShould Nimata use CouchDB?".to_string(),
+            ),
+            ("thread".to_string(), "Me:\nYes: replication.".to_string()),
+            (
+                "context".to_string(),
+                format!(
+                    "{}\n\nMe wrote:\nNo: mobile changes it.",
+                    nimata_core::context::CONTEXT_LABEL
+                ),
+            ),
+            ("thread".to_string(), "Me:\nWeigh both.".to_string()),
+        ];
+        assert_eq!(summary(&preview), expected);
+        assert!(preview["estimatedTokens"].as_u64().unwrap() > 0);
+
+        let mine = add(&left["id"], "Weigh both.", json!([right["id"]]));
+        assert_eq!(mine["contextIds"], json!([right["id"]]));
+        let reply = ask(&s, &mine["id"]).unwrap();
+        let details = finished(&s, &reply["id"]);
+        assert_eq!(details["status"], "complete");
+        assert_eq!(
+            summary(&details["sent"]),
+            expected,
+            "the model got what the preview showed"
+        );
+        assert_eq!(details["sent"]["model"], "gpt-5.6");
+    }
+
     #[test]
     fn asking_without_a_key_explains_what_to_do() {
         let base = serve(vec![]);

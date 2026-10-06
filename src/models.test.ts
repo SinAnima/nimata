@@ -178,9 +178,15 @@ describe("asking a model (Stage 3 demo)", () => {
     );
     expect(await within(article).findByText("gpt-5.6-2026-08-01")).toBeTruthy();
     expect(within(article).getByText("41 sent, 12 received")).toBeTruthy();
-    expect(
-      await within(article).findByText(/1 post: the thread down to/),
-    ).toBeTruthy();
+    await fireEvent.click(
+      await within(article).findByRole("button", {
+        name: "See exactly what was sent",
+      }),
+    );
+    const sent = await screen.findByRole("list", {
+      name: "Messages sent, in order",
+    });
+    expect(within(sent).getByText("Me: Question")).toBeTruthy();
   });
 });
 

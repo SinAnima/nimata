@@ -199,9 +199,9 @@ class Notebook {
     const view = this.view;
     if (!view || !this.me) return null;
     const id = view.discussion.id;
-    const { draft } = this.composers.get(id);
+    const { draft, context } = this.composers.get(id);
     try {
-      const post = await api.addPost(id, parentId, draft);
+      const post = await api.addPost(id, parentId, draft, context);
       this.composers.clear(id);
       if (this.view?.discussion.id === id) {
         this.view.posts.push(post);

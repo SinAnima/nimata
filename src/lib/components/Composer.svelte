@@ -7,6 +7,8 @@
   import { aliasesOf, mentionAt, resolveAlias } from "../mentions";
   import { notebook } from "../stores/notebook.svelte";
   import AskLine from "./AskLine.svelte";
+  import { previewContext } from "../api";
+  import { showContext } from "../stores/contextView.svelte";
 
   interface Props {
     discussionId: Uuid;
@@ -66,6 +68,33 @@
       problems.length === 0,
   );
   let posting = $state(false);
+
+  /** The posts chosen as context, for the chips above the text box. */
+  const contextPosts = $derived(
+    current.context.flatMap((id) => {
+      const post = postsById.get(id);
+      return post ? [post] : [];
+    }),
+  );
+
+  function previewFor(): void {
+    const model = answerers.models[0];
+    if (!model || !target) return;
+    const others = answerers.models.length - 1;
+    const title =
+      others > 0
+        ? `What ${model.participant.displayName} will be sent (the ${others} other ${others === 1 ? "model gets" : "models get"} the same posts)`
+        : `What ${model.participant.displayName} will be sent`;
+    void showContext(title, () =>
+      previewContext(
+        discussionId,
+        target.id,
+        model.participant.id,
+        current.draft,
+        current.context,
+      ),
+    );
+  }
 
   async function submit(): Promise<void> {
     if (!canPost || posting || !target) return;
@@ -139,6 +168,34 @@
     {/if}
   </div>
 
+  {#if contextPosts.length > 0}
+    <div
+      class="mt-1.5 flex flex-wrap items-center gap-1.5 text-sm"
+      role="group"
+      aria-label="Also considering"
+    >
+      <span class="text-muted">Also considering</span>
+      {#each contextPosts as post (post.id)}
+        <span
+          class="inline-flex max-w-full items-center gap-1 rounded border border-accent/50 bg-accent-soft/40 py-0.5 pr-1 pl-2"
+        >
+          <span class="truncate">
+            <span class="font-medium">{nameOf(post.authorId)}</span>:
+            <span class="font-serif italic">{excerpt(post.body, 40)}</span>
+          </span>
+          <button
+            type="button"
+            class="min-h-7 shrink-0 rounded px-1 text-muted hover:text-ink"
+            aria-label="Stop considering {nameOf(post.authorId)}'s post"
+            onclick={() => composers.toggleContext(discussionId, post.id)}
+          >
+            ×
+          </button>
+        </span>
+      {/each}
+    </div>
+  {/if}
+
   <div class="mt-2 flex items-end gap-3">
     <label class="min-w-0 flex-1">
       <span class="sr-only">Post text</span>
@@ -192,4 +249,13 @@
   {/if}
 
   <AskLine {answerers} bind:choice />
+  {#if answerers.models.length > 0 && target}
+    <button
+      type="button"
+      class="mt-1 rounded text-sm text-muted underline-offset-2 hover:text-ink hover:underline"
+      onclick={previewFor}
+    >
+      What will be sent?
+    </button>
+  {/if}
 </form>

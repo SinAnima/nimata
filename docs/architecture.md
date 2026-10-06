@@ -85,10 +85,13 @@ stays fully navigable without sacrificing chronological reading.
 Two different relationships connect posts:
 
 1. **Reply**: the post this one answers (`parent_id`). Exactly zero or one.
-2. **Context reference**: other posts the author was asked to consider
-   (introduced in Stage 5). Any number.
+2. **Context reference**: other posts the author chose to take into
+   account, with Include. Any number, from any branch of the same
+   discussion.
 
-A model replying to a post receives its ancestry (root to parent) by
-default, plus only those context references that were explicitly chosen.
+A model replying to a post receives its ancestry (root to parent), plus the
+context references made anywhere in that chain, sent in a labelled message
+so the model can tell them apart (`nimata_core::context`). Exactly what was
+sent is recorded with each request.
 Keeping the two separate means "what this answers" and "what this was shown"
 are never confused.
