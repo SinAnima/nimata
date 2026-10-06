@@ -31,8 +31,26 @@ npm install
 
 ```sh
 npm run tauri dev                 # desktop app with hot reload
-npm run tauri ios dev             # iOS simulator
+npm run tauri ios dev -- "iPhone 17"   # iOS simulator, by name
 npm run tauri android dev         # Android emulator or device
+```
+
+### iOS simulator
+
+Start the simulator before `tauri ios dev`. Tauri installs the app without
+booting the simulator, so on a simulator that is not running the install
+fails at the very end ("Unable to lookup in current state: Shutdown"), and
+the Simulator window keeps showing whatever app ran there last:
+
+```sh
+xcrun simctl boot "iPhone 17"; open -a Simulator
+npm run tauri ios dev -- "iPhone 17"
+```
+
+To see the app's own log, including Rust panics:
+
+```sh
+xcrun simctl spawn booted log show --last 5m --predicate 'process == "Nimata"' --style compact
 ```
 
 ## Running tests

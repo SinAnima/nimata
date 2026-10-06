@@ -48,6 +48,8 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before anything creates an HTTP client, including Tauri itself.
+    nimata_core::providers::install_crypto_provider();
     with_commands(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .manage(secrets::Keys::os())

@@ -369,10 +369,21 @@ where
     }))
 }
 
+/// Makes `ring` the process-wide TLS crypto provider. reqwest is built with
+/// `rustls-no-provider` (so nothing needs CMake on mobile), and Cargo applies
+/// that feature to every reqwest client in the app, including ones Tauri
+/// creates itself, such as the mobile dev-server proxy. Without a default
+/// provider those panic on first use, so install one at startup. Safe to
+/// call more than once.
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// The HTTP client used for every provider. TLS uses rustls with the
 /// `ring` backend and Mozilla's root certificates, which builds and behaves
 /// the same on desktop and mobile.
 pub fn http_client() -> reqwest::Client {
+    install_crypto_provider();
     let roots = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
@@ -389,4 +400,18 @@ pub fn http_client() -> reqwest::Client {
         .user_agent(concat!("Nimata/", env!("CARGO_PKG_VERSION")))
         .build()
         .expect("the HTTP client configuration is valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_http_client_works_once_the_provider_is_installed() {
+        install_crypto_provider();
+        install_crypto_provider();
+        // A client built without Nimata's own TLS setup, as Tauri does.
+        let _ = reqwest::Client::new();
+        let _ = http_client();
+    }
 }
