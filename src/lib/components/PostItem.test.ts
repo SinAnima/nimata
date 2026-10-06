@@ -24,6 +24,7 @@ function post(id: string, body: string, parentId: string | null): Post {
     deletedAt: null,
     status: "complete",
     providerMetadata: null,
+    contextIds: [],
   };
 }
 
@@ -57,6 +58,10 @@ function renderReply(quoteParent: boolean, onShowParent = vi.fn()) {
     onAsk: vi.fn(),
     onStop: vi.fn(),
     onRetry: vi.fn(),
+    included: false,
+    onToggleInclude: vi.fn(),
+    contextPosts: [],
+    onShowPost: vi.fn(),
   });
   return onShowParent;
 }

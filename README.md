@@ -31,14 +31,15 @@ keychain.
 
 Keyboard shortcuts on desktop:
 
-| Keys      | Action                        |
-| --------- | ----------------------------- |
-| Cmd+N     | New discussion                |
-| Cmd+Enter | Post, or start the discussion |
-| J / K     | Next / previous post          |
-| R         | Reply to the focused post     |
-| E         | Edit the focused post (yours) |
-| Esc       | Cancel the reply target       |
+| Keys      | Action                              |
+| --------- | ----------------------------------- |
+| Cmd+N     | New discussion                      |
+| Cmd+Enter | Post, or start the discussion       |
+| J / K     | Next / previous post                |
+| R         | Reply to the focused post           |
+| E         | Edit the focused post (yours)       |
+| C         | Include the focused post as context |
+| Esc       | Cancel the reply target             |
 
 ## Principles
 

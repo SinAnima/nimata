@@ -97,21 +97,35 @@ later stage.
 
 ## What a model is sent
 
-Only the thread from the first post down to the post being replied to:
+1. **The reply chain:** the posts from the discussion's first post down to
+   the post being answered. Other branches are not sent.
+2. **Context you chose:** posts marked with **Include** (or C) while
+   writing are saved with your post as context references. They are sent
+   in a separate message labelled "For context, from another branch of this
+   discussion (not part of the reply chain):", placed just before the post
+   that chose them. References carry down the thread: any model replying
+   further down that chain sees them too.
+3. **A short instruction** saying the model is one participant in a
+   threaded discussion, that context is labelled, and that it should reply
+   to the last message.
 
-- other branches of the discussion and other discussions are never sent;
-- deleted posts and unfinished or failed replies are left out;
-- each message from someone else starts with their name, and the model's
-  own earlier posts are sent as its own messages;
-- a short instruction tells the model it is one participant in a threaded
-  discussion.
+Deleted posts and unfinished or failed replies are left out. Each message
+from someone else starts with their name; the model's own earlier posts are
+sent as its own messages ("You wrote:" inside context). Other discussions
+are never included.
 
-Each request is recorded, including exactly which posts were sent; the
-reply's details panel shows how many. Stage 5 adds a full preview and
-explicit extra context.
+**Size and trimming.** Nimata estimates the size at about four characters
+per token and keeps each request within a budget: 100,000 estimated tokens
+for OpenAI and Anthropic, 6,000 for OpenAI-compatible connections, whose
+local models often have small context windows. Over budget, the oldest
+posts in the middle of the chain are left out first, never the first post
+or the post being answered; then context, oldest first.
 
-OpenAI requests set `store: false`, so OpenAI does not keep the
-conversation on its side.
+**Before and after.** **What will be sent?** under the composer shows
+exactly what the answering model will get, including what is left out and
+why. After a reply, its details show **See exactly what was sent**: the
+exact instructions and messages are recorded with each request, so the
+answer stays available even if posts are later edited or deleted.
 
 ## What is recorded
 

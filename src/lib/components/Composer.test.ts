@@ -23,6 +23,7 @@ function post(id: string, body: string, createdAt: number): Post {
     deletedAt: null,
     status: "complete",
     providerMetadata: null,
+    contextIds: [],
   };
 }
 

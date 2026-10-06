@@ -90,6 +90,7 @@ Files are named `<title>.nimata.json`.
 | `deletedAt`        | When the post was deleted, UTC. Omitted unless deleted.                                                                                                  |
 | `revisions`        | Earlier versions, oldest first. Omitted when there are none.                                                                                             |
 | `providerMetadata` | For model replies: `provider`, `model` (exact version), `responseId`, `requestId`, `inputTokens`, `outputTokens`, `incompleteReason`. Omitted otherwise. |
+| `contextIds`       | Other posts the author chose as context, besides the one replied to. Omitted when empty.                                                                 |
 
 A deleted post stays in the file with an empty body so that replies to it
 still have a parent. Its revisions are erased when it is deleted.
@@ -115,6 +116,7 @@ written in different offsets do not sort correctly as strings.
 
 - Every `parentId` refers to a post in the same file.
 - Every `authorId` refers to a participant in the same file.
+- Every ID in `contextIds` refers to a post in the same file.
 - IDs are Nimata's own. Provider identifiers, when they exist (Stage 3 on),
   appear only as metadata on model posts, never as IDs.
 

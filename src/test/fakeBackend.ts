@@ -18,6 +18,7 @@ import type {
   Post,
   ProviderConfig,
   Revision,
+  SentContext,
 } from "../lib/types";
 
 type Args = Record<string, unknown>;
@@ -183,6 +184,7 @@ export class FakeBackend {
       deletedAt: null,
       status: "complete",
       providerMetadata: null,
+      contextIds: [],
     };
     this.posts.push(post);
     return post;
@@ -240,6 +242,97 @@ export class FakeBackend {
     return generation;
   }
 
+  /** Mirrors nimata-core's context::build for the tests' purposes. */
+  buildContext(
+    targetId: string,
+    responderId: string,
+    extra?: Post,
+  ): SentContext {
+    const posts = extra ? [...this.posts, extra] : this.posts;
+    const byId = new Map(posts.map((p) => [p.id, p]));
+    const chain: Post[] = [];
+    for (
+      let p = byId.get(targetId);
+      p;
+      p = p.parentId ? byId.get(p.parentId) : undefined
+    )
+      chain.unshift(p);
+    const name = (id: string) =>
+      id === this.me.id
+        ? this.me.displayName
+        : (this.models.find((m) => m.participant.id === id)?.participant
+            .displayName ?? "Someone");
+    const inChain = new Set(chain.map((p) => p.id));
+    const seen = new Set<string>();
+    const messages: SentContext["messages"] = [];
+    const omitted: SentContext["omitted"] = [];
+    for (const post of chain) {
+      const refs = post.contextIds
+        .filter((id) => !inChain.has(id) && !seen.has(id))
+        .map((id) => (seen.add(id), byId.get(id)!))
+        .filter(Boolean);
+      const usable = refs.filter(
+        (r) => r.deletedAt === null && r.status === "complete",
+      );
+      for (const r of refs.filter((r) => !usable.includes(r)))
+        omitted.push({
+          postId: r.id,
+          source: "context",
+          reason: r.deletedAt ? "deleted" : "unfinished",
+        });
+      if (usable.length > 0)
+        messages.push({
+          role: "user",
+          source: "context",
+          postIds: usable.map((r) => r.id),
+          text:
+            "For context, from another branch of this discussion (not part of the reply chain):\n\n" +
+            usable
+              .map(
+                (r) =>
+                  `${r.authorId === responderId ? "You" : name(r.authorId)} wrote:\n${r.body}`,
+              )
+              .join("\n\n"),
+        });
+      if (post.deletedAt !== null || post.status !== "complete") {
+        omitted.push({
+          postId: post.id,
+          source: "thread",
+          reason: post.deletedAt ? "deleted" : "unfinished",
+        });
+        continue;
+      }
+      messages.push(
+        post.authorId === responderId
+          ? {
+              role: "assistant",
+              source: "thread",
+              postIds: [post.id],
+              text: post.body,
+            }
+          : {
+              role: "user",
+              source: "thread",
+              postIds: [post.id],
+              text: `${name(post.authorId)}:\n${post.body}`,
+            },
+      );
+    }
+    const model = this.models.find((m) => m.participant.id === responderId)!;
+    const tokens = messages.reduce(
+      (n, m) => n + Math.ceil(m.text.length / 4) + 4,
+      60,
+    );
+    return {
+      model: model.participant.model ?? "",
+      instructions: `You are ${model.participant.displayName}, one participant in a threaded discussion kept in Nimata.`,
+      messages,
+      omitted,
+      estimatedTokens: tokens,
+      budgetTokens: model.providerId.startsWith("provider-0") ? 6000 : 100000,
+    };
+  }
+
   #startReply(parentId: string, participantId: string): Post {
     const parent = this.#post(parentId);
     if (parent.status !== "complete")
@@ -264,6 +357,7 @@ export class FakeBackend {
       contextPostIds: [parent.id],
       startedAt: post.createdAt,
       finishedAt: null,
+      sent: this.buildContext(parent.id, participantId),
     });
     return { ...post };
   }
@@ -368,11 +462,22 @@ export class FakeBackend {
         if (args.parentId === null || args.parentId === undefined)
           throw "a post replies to an earlier post; start a new discussion for a new topic";
         this.#checkParent(d.id, args.parentId);
+        const contextIds = [
+          ...new Set((args.contextIds as string[] | undefined) ?? []),
+        ].filter((id) => id !== args.parentId);
+        for (const id of contextIds) {
+          const ref = this.#post(id);
+          if (ref.discussionId !== d.id)
+            throw "context can only come from the same discussion";
+          if (ref.deletedAt !== null)
+            throw "a deleted post cannot be used as context";
+        }
         const post = this.#insertPost(
           d.id,
           (args.parentId as string) ?? null,
           body,
         );
+        post.contextIds = contextIds;
         d.updatedAt = post.createdAt;
         this.drafts.delete(d.id);
         return post;
@@ -402,6 +507,7 @@ export class FakeBackend {
           parentId,
           body,
           updatedAt: this.now,
+          contextIds: (args.contextIds as string[] | undefined) ?? [],
         });
         return null;
       }
@@ -600,6 +706,26 @@ export class FakeBackend {
       case "set_default_model":
         this.defaultModelId = (args.participantId as string | null) ?? null;
         return null;
+      case "preview_context": {
+        const parent = this.#post(args.parentId);
+        if (args.draft === null || args.draft === undefined)
+          return this.buildContext(parent.id, String(args.participantId));
+        const unsent: Post = {
+          id: "unsent",
+          discussionId: parent.discussionId,
+          parentId: parent.id,
+          authorId: this.me.id,
+          body: String(args.draft).trim() || "(your post)",
+          createdAt: this.now + 1,
+          tzOffsetMinutes: 0,
+          editedAt: null,
+          deletedAt: null,
+          status: "complete",
+          providerMetadata: null,
+          contextIds: (args.contextIds as string[] | undefined) ?? [],
+        };
+        return this.buildContext("unsent", String(args.participantId), unsent);
+      }
       case "reply_details":
         return this.generations.find((g) => g.postId === args.postId) ?? null;
       case "app_info":

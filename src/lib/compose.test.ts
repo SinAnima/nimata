@@ -35,6 +35,7 @@ function post(
     deletedAt: null,
     status: "complete",
     providerMetadata: null,
+    contextIds: [],
     ...extra,
   };
 }

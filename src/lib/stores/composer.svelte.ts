@@ -4,15 +4,22 @@ import type { Draft, Uuid } from "../types";
 export interface ComposerState {
   replyTo: Uuid | null;
   draft: string;
+  /** Posts chosen as context, in the order chosen. */
+  context: Uuid[];
 }
 
 export type SaveDraft = (
   discussionId: Uuid,
   parentId: Uuid | null,
   body: string,
+  contextIds: Uuid[],
 ) => Promise<void>;
 
-const EMPTY: ComposerState = Object.freeze({ replyTo: null, draft: "" });
+const EMPTY: ComposerState = Object.freeze({
+  replyTo: null,
+  draft: "",
+  context: [],
+});
 
 export const SAVE_DELAY_MS = 400;
 
@@ -41,6 +48,7 @@ export class Composers {
     this.#byDiscussion[discussionId] = {
       replyTo: draft.parentId,
       draft: draft.body,
+      context: draft.contextIds ?? [],
     };
   }
 
@@ -50,6 +58,16 @@ export class Composers {
 
   setDraft(discussionId: Uuid, draft: string): void {
     this.#update(discussionId, { draft });
+  }
+
+  /** Adds a post as context, or removes it if it is already there. */
+  toggleContext(discussionId: Uuid, postId: Uuid): void {
+    const context = this.get(discussionId).context;
+    this.#update(discussionId, {
+      context: context.includes(postId)
+        ? context.filter((id) => id !== postId)
+        : [...context, postId],
+    });
   }
 
   /** Forgets the composer after posting. The database clears its copy itself. */
@@ -78,7 +96,7 @@ export class Composers {
   #saveNow(discussionId: Uuid): void {
     clearTimeout(this.#pending.get(discussionId));
     this.#pending.delete(discussionId);
-    const { replyTo, draft } = this.get(discussionId);
-    this.#save(discussionId, replyTo, draft).catch(this.#onError);
+    const { replyTo, draft, context } = this.get(discussionId);
+    this.#save(discussionId, replyTo, draft, context).catch(this.#onError);
   }
 }

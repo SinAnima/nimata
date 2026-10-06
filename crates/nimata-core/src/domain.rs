@@ -63,6 +63,11 @@ pub struct Post {
     /// metadata, never part of Nimata's identity for the post.
     #[serde(default)]
     pub provider_metadata: Option<ProviderMetadata>,
+    /// Other posts in the discussion the author asked to be taken into
+    /// account, besides the post replied to. They do not change where the
+    /// post sits in the thread.
+    #[serde(default)]
+    pub context_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +185,10 @@ pub struct Generation {
     pub context_post_ids: Vec<Uuid>,
     pub started_at: UnixMillis,
     pub finished_at: Option<UnixMillis>,
+    /// The exact text sent, with what was left out; recorded from schema
+    /// version 5.
+    #[serde(default)]
+    pub sent: Option<crate::context::SentContext>,
 }
 
 impl Post {
@@ -229,6 +238,9 @@ pub struct Draft {
     pub parent_id: Option<Uuid>,
     pub body: String,
     pub updated_at: UnixMillis,
+    /// Posts chosen as context for the unsent post.
+    #[serde(default)]
+    pub context_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +367,7 @@ mod tests {
             deleted_at: None,
             status: PostStatus::Complete,
             provider_metadata: None,
+            context_ids: vec![],
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["createdAt"], 1_700_000_000_000_i64);

@@ -7,13 +7,16 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use nimata_core::context::build_request;
-use nimata_core::domain::{GenerationStatus, Post, ProviderConfig, ProviderKind, ProviderMetadata};
+use nimata_core::context::{self, SentContext};
+use nimata_core::domain::{
+    GenerationStatus, ModelParticipant, Post, ProviderConfig, ProviderKind, ProviderMetadata,
+};
 use nimata_core::providers::anthropic::{self, Anthropic};
 use nimata_core::providers::openai::{self, OpenAi};
 use nimata_core::providers::openai_compatible::OpenAiCompatible;
 use nimata_core::providers::{
-    Completion, HttpClient, ModelProvider, ModelRequest, ProviderError, StreamEvent, http_client,
+    Completion, HttpClient, ModelProvider, ModelRequest, ProviderError, StreamEvent,
+    context_budget, http_client,
 };
 use nimata_core::repository::GenerationOutcome;
 use nimata_core::{Repository, Timestamp, UnixMillis};
@@ -111,6 +114,34 @@ fn text<E: ToString>(e: E) -> String {
     e.to_string()
 }
 
+/// What `model` would be sent to reply to `target`. `unsent` is a post not
+/// yet saved (the composer's draft), included so the preview matches what
+/// posting will send.
+pub fn context_for(
+    repo: &mut impl Repository,
+    discussion_id: Uuid,
+    target: Uuid,
+    model: &ModelParticipant,
+    unsent: Option<Post>,
+) -> Result<SentContext, String> {
+    let view = repo.get_discussion(discussion_id).map_err(text)?;
+    let mut posts = view.posts;
+    posts.extend(unsent);
+    let mut participants = view.participants;
+    participants.push(model.participant.clone());
+    participants.push(repo.local_user().map_err(text)?);
+    let config = repo.provider(model.provider_id).map_err(text)?;
+    context::build(
+        &posts,
+        &participants,
+        target,
+        &model.participant,
+        model.participant.model.as_deref().unwrap_or_default(),
+        context_budget(config.kind),
+    )
+    .map_err(text)
+}
+
 /// Asks the model participant `participant_id` to reply to `parent_id`.
 /// Returns the new reply, which then streams in the background.
 pub fn ask<R: Runtime>(
@@ -142,27 +173,18 @@ pub fn ask<R: Runtime>(
         let provider = generations.provider_for(&config, key)?;
         let provider_name = config.kind.as_str().to_string();
 
-        let view = repo.get_discussion(discussion_id).map_err(text)?;
-        let mut participants = view.participants.clone();
-        participants.push(model.participant.clone());
-        let model_id = model.participant.model.clone().unwrap_or_default();
-        let (request, context) = build_request(
-            &view.posts,
-            &participants,
-            parent_id,
-            &model.participant,
-            &model_id,
-        )
-        .map_err(text)?;
+        let sent = context_for(&mut *repo, discussion_id, parent_id, &model, None)?;
+        let request = sent.request();
         let (post, generation) = repo
             .begin_generation(
                 discussion_id,
                 parent_id,
                 participant_id,
-                &context,
+                &sent.post_ids(),
                 Timestamp::now(),
             )
             .map_err(text)?;
+        repo.record_sent(generation.id, &sent).map_err(text)?;
         (provider, provider_name, request, post, generation.id)
     };
 

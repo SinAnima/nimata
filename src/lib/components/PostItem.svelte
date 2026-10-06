@@ -11,6 +11,7 @@
   import { excerpt, paragraphs } from "../stream";
   import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
   import { errorMessage, postRevisions, replyDetails } from "../api";
+  import { showContext } from "../stores/contextView.svelte";
   import ParticipantMark from "./ParticipantMark.svelte";
 
   interface Props {
@@ -38,6 +39,17 @@
     onAsk: (participantId: string) => void;
     onStop: () => void;
     onRetry: () => void;
+    /** Chosen as context for the post being written. */
+    included: boolean;
+    onToggleInclude: () => void;
+    /** Posts this one chose as context. */
+    contextPosts: {
+      id: string;
+      authorName: string;
+      body: string;
+      deleted: boolean;
+    }[];
+    onShowPost: (id: string) => void;
   }
 
   let {
@@ -62,6 +74,10 @@
     onAsk,
     onStop,
     onRetry,
+    included,
+    onToggleInclude,
+    contextPosts,
+    onShowPost,
   }: Props = $props();
 
   let showDetails = $state(false);
@@ -94,6 +110,12 @@
     } catch {
       generation = null;
     }
+  }
+
+  function showSent(): void {
+    void showContext(`What ${name} was sent`, async () => {
+      return (await replyDetails(post.id))?.sent ?? null;
+    });
   }
 
   function ask(participantId: string): void {
@@ -218,6 +240,20 @@
           </div>
         </details>
       {/if}
+      <button
+        type="button"
+        class={[
+          "-my-2 min-h-9 rounded px-2 text-sm hover:text-accent",
+          included ? "font-medium text-accent" : "text-muted",
+        ]}
+        aria-pressed={included}
+        title={included
+          ? "Included as context in the post you are writing"
+          : "Include as context in the post you are writing"}
+        onclick={onToggleInclude}
+      >
+        {included ? "Included" : "Include"}
+      </button>
       {#if isMine && post.status === "complete"}
         <button
           type="button"
@@ -288,8 +324,16 @@
           <dt>Shown</dt>
           <dd>
             {generation.contextPostIds.length}
-            {generation.contextPostIds.length === 1 ? "post" : "posts"}: the
-            thread down to the post it replies to
+            {generation.contextPostIds.length === 1 ? "post" : "posts"}
+            {#if generation.sent}
+              <button
+                type="button"
+                class="ml-1 rounded font-medium text-accent hover:underline"
+                onclick={showSent}
+              >
+                See exactly what was sent
+              </button>
+            {/if}
           </dd>
         {/if}
       {/if}
@@ -347,6 +391,19 @@
       {/if}
     </button>
   {/if}
+
+  {#each contextPosts as ref (ref.id)}
+    <button
+      type="button"
+      class="mt-1 block max-w-full rounded text-left text-sm text-muted hover:text-ink"
+      onclick={() => onShowPost(ref.id)}
+    >
+      Also considering <span class="font-medium text-accent"
+        >{ref.authorName}</span
+      >{#if ref.deleted}, deleted post{:else}:
+        <span class="font-serif italic">{excerpt(ref.body, 70)}</span>{/if}
+    </button>
+  {/each}
 
   {#if editing}
     <form

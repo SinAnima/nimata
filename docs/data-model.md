@@ -21,7 +21,7 @@ than risk changing it.
 Migration tests load frozen databases from earlier versions
 (`crates/nimata-core/tests/fixtures/`) and check that nothing is lost.
 
-## Tables (schema version 4)
+## Tables (schema version 5)
 
 ### participants
 
@@ -202,3 +202,27 @@ lowercase letters and digits).
 `app_settings` is a key-value table for small preferences. `default_model`
 holds the participant ID of the model asked when neither a mention nor the
 thread decides.
+
+## Context references (schema version 5)
+
+A post has one reply edge (`posts.parent_id`, where it sits in the thread)
+and any number of context references: other posts in the same discussion
+its author chose to take into account.
+
+### context_refs
+
+| column      | meaning                         |
+| ----------- | ------------------------------- |
+| post_id     | the post that chose the context |
+| ref_post_id | the post chosen                 |
+| position    | order chosen                    |
+
+References are fixed once the post exists (schema). They must point to an
+undeleted post in the same discussion; a reference to the post being
+replied to is dropped as redundant.
+
+`drafts.context_ids` keeps the context chosen for an unsent post (JSON
+array). `generations.sent_json` records exactly what a request sent: the
+model, instructions, each message with its source (`thread` or `context`)
+and post IDs, what was left out and why (`deleted`, `unfinished`,
+`trimmed`), and the size estimate and budget.

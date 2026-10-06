@@ -49,6 +49,22 @@ pub trait Repository {
         author_id: Uuid,
         body: &str,
         at: Timestamp,
+    ) -> Result<Post> {
+        self.add_post_with_context(discussion_id, parent_id, author_id, body, &[], at)
+    }
+
+    /// Like [`Repository::add_post`], also recording posts chosen as
+    /// context. Each must be an existing, undeleted post in the same
+    /// discussion; references to the post being replied to are dropped as
+    /// redundant.
+    fn add_post_with_context(
+        &mut self,
+        discussion_id: Uuid,
+        parent_id: Option<Uuid>,
+        author_id: Uuid,
+        body: &str,
+        context_ids: &[Uuid],
+        at: Timestamp,
     ) -> Result<Post>;
 
     /// Replaces a post's text, keeping the previous text as a revision. Only
@@ -86,7 +102,28 @@ pub trait Repository {
         parent_id: Option<Uuid>,
         body: &str,
         at: UnixMillis,
+    ) -> Result<Option<Draft>> {
+        self.save_draft_with_context(discussion_id, parent_id, body, &[], at)
+    }
+
+    /// Like [`Repository::save_draft`], keeping the context chosen for the
+    /// unsent post. A draft with neither text, reply target, nor context is
+    /// removed.
+    fn save_draft_with_context(
+        &mut self,
+        discussion_id: Uuid,
+        parent_id: Option<Uuid>,
+        body: &str,
+        context_ids: &[Uuid],
+        at: UnixMillis,
     ) -> Result<Option<Draft>>;
+
+    /// Records exactly what was sent with a request.
+    fn record_sent(
+        &mut self,
+        generation_id: Uuid,
+        sent: &crate::context::SentContext,
+    ) -> Result<()>;
 
     /// The provider of `kind`, created with the standard endpoint on first
     /// use. Changing its endpoint later does not make it a different provider.

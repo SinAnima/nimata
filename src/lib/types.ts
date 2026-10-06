@@ -40,6 +40,8 @@ export interface Post {
   status: PostStatus;
   /** For model replies: which provider and model version answered. */
   providerMetadata: ProviderMetadata | null;
+  /** Other posts chosen as context, besides the one replied to. */
+  contextIds: Uuid[];
 }
 
 export interface ProviderMetadata {
@@ -114,6 +116,33 @@ export interface Generation {
   contextPostIds: Uuid[];
   startedAt: UnixMillis;
   finishedAt: UnixMillis | null;
+  /** Exactly what was sent; recorded from schema version 5. */
+  sent: SentContext | null;
+}
+
+export type ContextSource = "thread" | "context";
+
+export interface SentMessage {
+  role: "user" | "assistant";
+  text: string;
+  source: ContextSource;
+  postIds: Uuid[];
+}
+
+export interface Omitted {
+  postId: Uuid;
+  source: ContextSource;
+  reason: "deleted" | "unfinished" | "trimmed";
+}
+
+/** Exactly what a model is, or was, sent. */
+export interface SentContext {
+  model: string;
+  instructions: string;
+  messages: SentMessage[];
+  omitted: Omitted[];
+  estimatedTokens: number;
+  budgetTokens: number;
 }
 
 /** An earlier version of an edited post. */
@@ -145,6 +174,8 @@ export interface Draft {
   parentId: Uuid | null;
   body: string;
   updatedAt: UnixMillis;
+  /** Posts chosen as context for the unsent post. */
+  contextIds: Uuid[];
 }
 
 export interface DiscussionView {
