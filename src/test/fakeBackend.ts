@@ -11,6 +11,7 @@ import type {
   DiscussionView,
   Draft,
   Participant,
+  Capabilities,
   Generation,
   KeyStatus,
   ModelParticipant,
@@ -58,8 +59,25 @@ export class FakeBackend {
     displayName: "OpenAI",
     baseUrl: null,
   };
-  /** The saved key, kept here only to check it never reaches the UI. */
-  savedKey: string | null = null;
+  anthropic: ProviderConfig = {
+    id: "provider-anthropic",
+    kind: "anthropic",
+    displayName: "Anthropic",
+    baseUrl: null,
+  };
+  /** Every connection: the standard two, then added ones. */
+  connections: ProviderConfig[] = [this.openai, this.anthropic];
+  /** Saved keys by provider ID, kept here only to check they never reach the UI. */
+  keys = new Map<string, string>();
+
+  /** The OpenAI key, which most tests use. */
+  get savedKey(): string | null {
+    return this.keys.get(this.openai.id) ?? null;
+  }
+  set savedKey(key: string | null) {
+    if (key === null) this.keys.delete(this.openai.id);
+    else this.keys.set(this.openai.id, key);
+  }
   /** Shown in development builds. */
   developmentBuild = true;
   /** What "Test connection" finds, or an error to report. */
@@ -184,13 +202,35 @@ export class FakeBackend {
     };
   }
 
-  #keyStatus(): KeyStatus {
+  #connection(id: unknown): ProviderConfig {
+    const provider = this.connections.find((p) => p.id === id);
+    if (!provider) throw "provider not found";
+    return provider;
+  }
+
+  #capabilities(provider: ProviderConfig): Capabilities {
+    const custom = provider.kind === "openai_compatible";
     return {
-      source: this.savedKey ? "saved" : null,
-      hint:
-        this.savedKey && this.developmentBuild ? this.savedKey.slice(-4) : null,
+      requiresKey: !custom,
+      customEndpoint: custom,
+      multiple: custom,
+      modelDiscovery: true,
+      streaming: true,
+      usage: !custom,
+    };
+  }
+
+  #keyStatus(provider: ProviderConfig): KeyStatus {
+    const key = this.keys.get(provider.id) ?? null;
+    const variable = {
+      openai: "OPENAI_API_KEY",
+      anthropic: "ANTHROPIC_API_KEY",
+    }[provider.kind as "openai" | "anthropic"];
+    return {
+      source: key ? "saved" : null,
+      hint: key && this.developmentBuild ? key.slice(-4) : null,
       store: "the Keychain",
-      environmentVariable: this.developmentBuild ? "OPENAI_API_KEY" : null,
+      environmentVariable: this.developmentBuild ? (variable ?? null) : null,
     };
   }
 
@@ -204,9 +244,11 @@ export class FakeBackend {
     const parent = this.#post(parentId);
     if (parent.status !== "complete")
       throw "a model can only reply to a finished post";
-    if (!this.savedKey) throw "Add an OpenAI API key in Settings, Models.";
     const model = this.models.find((m) => m.participant.id === participantId);
     if (!model) throw "this model is no longer set up in Settings";
+    const provider = this.#connection(model.providerId);
+    if (this.#capabilities(provider).requiresKey && !this.keys.has(provider.id))
+      throw `Add an ${provider.displayName} API key in Settings, Models.`;
     const post: Post = {
       ...this.#insertPost(parent.discussionId, parent.id, ""),
       authorId: model.participant.id,
@@ -425,32 +467,79 @@ export class FakeBackend {
         return this.dialogPath;
       }
       case "providers":
-        return [
-          {
-            provider: { ...this.openai },
-            key: this.#keyStatus(),
-            models: structuredClone(this.models),
-          },
-        ];
+        return this.connections.map((provider) => ({
+          provider: { ...provider },
+          capabilities: this.#capabilities(provider),
+          key: this.#keyStatus(provider),
+          models: structuredClone(
+            this.models.filter((m) => m.providerId === provider.id),
+          ),
+        }));
       case "save_api_key": {
+        const provider = this.#connection(args.providerId);
         const key = String(args.key).trim();
         if (key === "") throw "paste the API key first";
-        this.savedKey = key;
-        return this.#keyStatus();
+        this.keys.set(provider.id, key);
+        return this.#keyStatus(provider);
       }
-      case "remove_api_key":
-        this.savedKey = null;
-        return this.#keyStatus();
-      case "provider_models":
-        if (!this.savedKey) throw "Add an OpenAI API key first.";
+      case "remove_api_key": {
+        const provider = this.#connection(args.providerId);
+        this.keys.delete(provider.id);
+        return this.#keyStatus(provider);
+      }
+      case "provider_models": {
+        const provider = this.#connection(args.providerId);
+        if (
+          this.#capabilities(provider).requiresKey &&
+          !this.keys.has(provider.id)
+        )
+          throw `Add an ${provider.displayName} API key first.`;
         if (typeof this.availableModels === "string")
           throw this.availableModels;
         return this.availableModels.map((id) => ({ id }));
+      }
+      case "add_endpoint": {
+        const name = String(args.displayName).trim();
+        const url = String(args.baseUrl).trim();
+        if (name === "") throw "names must be 1 to 80 characters";
+        if (!/^https?:\/\//.test(url))
+          throw "an endpoint must start with https:// or http://";
+        const provider: ProviderConfig = {
+          id: `provider-${this.#id()}`,
+          kind: "openai_compatible",
+          displayName: name,
+          baseUrl: url,
+        };
+        this.connections.push(provider);
+        if (args.key) this.keys.set(provider.id, String(args.key));
+        return { ...provider };
+      }
+      case "update_endpoint": {
+        const provider = this.#connection(args.providerId);
+        provider.displayName = String(args.displayName).trim();
+        provider.baseUrl = String(args.baseUrl).trim();
+        return { ...provider };
+      }
+      case "remove_endpoint": {
+        const provider = this.#connection(args.providerId);
+        const ids = this.models
+          .filter((m) => m.providerId === provider.id)
+          .map((m) => m.participant.id);
+        if (this.posts.some((p) => ids.includes(p.authorId)))
+          throw `models from ${provider.displayName} have written posts, so it stays; turn its models off instead`;
+        this.models = this.models.filter((m) => m.providerId !== provider.id);
+        this.connections = this.connections.filter((p) => p !== provider);
+        this.keys.delete(provider.id);
+        return null;
+      }
       case "set_model": {
+        const provider = this.#connection(args.providerId);
         const model = String(args.model).trim();
         const name = String(args.displayName).trim();
         if (name === "") throw "names must be 1 to 80 characters";
-        let entry = this.models.find((m) => m.participant.model === model);
+        let entry = this.models.find(
+          (m) => m.providerId === provider.id && m.participant.model === model,
+        );
         if (entry) {
           entry.participant.displayName = name;
           entry.enabled = Boolean(args.enabled);
@@ -460,10 +549,10 @@ export class FakeBackend {
               id: `model-${model}`,
               kind: "model",
               displayName: name,
-              provider: "openai",
+              provider: provider.kind,
               model,
             },
-            providerId: this.openai.id,
+            providerId: provider.id,
             enabled: Boolean(args.enabled),
             aliases: [],
           };

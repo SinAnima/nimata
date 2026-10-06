@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use nimata_core::archive::DiscussionArchive;
 use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
-use nimata_core::providers::ModelInfo;
+use nimata_core::providers::{Capabilities, ModelInfo, capabilities};
 use nimata_core::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Participant, Post, Repository,
     Revision, Timestamp, UnixMillis,
@@ -300,30 +300,94 @@ mod tests {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderView {
     provider: ProviderConfig,
+    capabilities: Capabilities,
     key: KeyStatus,
     models: Vec<ModelParticipant>,
 }
 
-/// Every provider with its key status and models. The standard OpenAI
-/// provider always exists.
+/// Every provider with what it can do, its key status, and its models.
+/// The standard OpenAI and Anthropic providers always exist.
 #[tauri::command]
 pub fn providers(
     state: State<'_, AppState>,
     keys: State<'_, Keys>,
 ) -> CommandResult<Vec<ProviderView>> {
     let mut repo = state.repo()?;
-    let openai = repo
-        .standard_provider(ProviderKind::OpenAi, UnixMillis::now())
-        .map_err(text)?;
+    for kind in [ProviderKind::OpenAi, ProviderKind::Anthropic] {
+        repo.standard_provider(kind, UnixMillis::now())
+            .map_err(text)?;
+    }
     let models = repo.model_participants().map_err(text)?;
-    Ok(vec![ProviderView {
-        key: keys.status(&openai)?,
-        models: models
-            .into_iter()
-            .filter(|m| m.provider_id == openai.id)
-            .collect(),
-        provider: openai,
-    }])
+    repo.providers()
+        .map_err(text)?
+        .into_iter()
+        .map(|provider| {
+            Ok(ProviderView {
+                capabilities: capabilities(provider.kind),
+                key: keys.status(&provider)?,
+                models: models
+                    .iter()
+                    .filter(|m| m.provider_id == provider.id)
+                    .cloned()
+                    .collect(),
+                provider,
+            })
+        })
+        .collect()
+}
+
+/// Adds an OpenAI-compatible connection, such as a local Ollama server.
+#[tauri::command]
+pub fn add_endpoint(
+    display_name: String,
+    base_url: String,
+    key: Option<String>,
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+) -> CommandResult<ProviderConfig> {
+    let provider = state
+        .repo()?
+        .add_provider(
+            ProviderKind::OpenAiCompatible,
+            &display_name,
+            &base_url,
+            UnixMillis::now(),
+        )
+        .map_err(text)?;
+    if let Some(key) = key.filter(|k| !k.trim().is_empty()) {
+        keys.save(&provider, &key)?;
+    }
+    Ok(provider)
+}
+
+#[tauri::command]
+pub fn update_endpoint(
+    provider_id: Uuid,
+    display_name: String,
+    base_url: String,
+    state: State<'_, AppState>,
+) -> CommandResult<ProviderConfig> {
+    let mut repo = state.repo()?;
+    repo.rename_provider(provider_id, &display_name, UnixMillis::now())
+        .map_err(text)?;
+    if base_url.trim().is_empty() {
+        return Err("an OpenAI-compatible connection needs its endpoint address".into());
+    }
+    repo.set_provider_base_url(provider_id, Some(&base_url), UnixMillis::now())
+        .map_err(text)
+}
+
+/// Removes a connection whose models have written nothing, and its key.
+#[tauri::command]
+pub fn remove_endpoint(
+    provider_id: Uuid,
+    state: State<'_, AppState>,
+    keys: State<'_, Keys>,
+) -> CommandResult<()> {
+    let config = provider_config(&state, provider_id)?;
+    state.repo()?.remove_provider(provider_id).map_err(text)?;
+    keys.remove(&config)?;
+    Ok(())
 }
 
 fn provider_config(state: &AppState, id: Uuid) -> CommandResult<ProviderConfig> {
@@ -358,9 +422,7 @@ pub async fn provider_models(
     generations: State<'_, Generations>,
 ) -> CommandResult<Vec<ModelInfo>> {
     let config = provider_config(&state, provider_id)?;
-    let Some((key, _)) = keys.resolve(&config)? else {
-        return Err(format!("Add an {} API key first.", config.display_name));
-    };
+    let key = keys.resolve(&config)?.map(|(key, _)| key);
     let provider = generations.provider_for(&config, key)?;
     provider.models().await.map_err(text)
 }

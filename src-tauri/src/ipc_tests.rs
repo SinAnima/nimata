@@ -539,6 +539,115 @@ mod replies {
         );
     }
 
+    const COMPATIBLE: &str =
+        include_str!("../../crates/nimata-core/tests/fixtures/openai_compatible_stream.sse");
+
+    #[test]
+    fn the_standard_providers_are_listed_with_their_capabilities() {
+        let w = app();
+        let providers = invoke(&w, "providers", json!({})).unwrap();
+        let kinds: Vec<_> = providers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["provider"]["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["openai", "anthropic"]);
+        assert_eq!(providers[1]["capabilities"]["requiresKey"], true);
+        assert_eq!(
+            providers[1]["key"]["environmentVariable"],
+            "ANTHROPIC_API_KEY"
+        );
+    }
+
+    /// Adds an OpenAI-compatible connection at `base` with one enabled model.
+    fn local_model(s: &Setup, base: &str) -> (Value, Value) {
+        let endpoint = invoke(
+            &s.w,
+            "add_endpoint",
+            json!({ "displayName": "Ollama", "baseUrl": base, "key": null }),
+        )
+        .unwrap();
+        let model = invoke(
+            &s.w,
+            "set_model",
+            json!({ "providerId": endpoint["id"], "model": "qwen3:8b", "displayName": "Qwen", "enabled": true }),
+        )
+        .unwrap();
+        (endpoint, model["participant"]["id"].clone())
+    }
+
+    #[test]
+    fn a_local_model_replies_without_a_key() {
+        let s = setup(&serve(vec![]));
+        let local = serve(vec![Reply {
+            status: "200 OK",
+            body: COMPATIBLE.into(),
+            hold: Duration::ZERO,
+        }]);
+        let (_, qwen) = local_model(&s, &local);
+
+        let reply = invoke(
+            &s.w,
+            "ask_model",
+            json!({ "discussionId": s.discussion, "parentId": s.question, "participantId": qwen }),
+        )
+        .unwrap();
+        assert_eq!(finished(&s, &reply["id"])["status"], "complete");
+        let done = post(&s, &reply["id"]);
+        assert_eq!(done["body"], "Local models can join too.");
+        assert_eq!(done["providerMetadata"]["provider"], "openai_compatible");
+        assert_eq!(done["providerMetadata"]["model"], "qwen3:8b");
+    }
+
+    #[test]
+    fn one_provider_failing_leaves_the_other_reply_intact() {
+        let openai = serve(vec![Reply {
+            status: "500 Internal Server Error",
+            body: r#"{"error":{"message":"boom"}}"#.into(),
+            hold: Duration::ZERO,
+        }]);
+        let s = setup(&openai);
+        let local = serve(vec![Reply {
+            status: "200 OK",
+            body: COMPATIBLE.into(),
+            hold: Duration::from_millis(200),
+        }]);
+        let (_, qwen) = local_model(&s, &local);
+
+        // Asked at the same moment, as sibling replies to the question.
+        let gpt_reply = ask(&s, &s.question).unwrap();
+        let qwen_reply = invoke(
+            &s.w,
+            "ask_model",
+            json!({ "discussionId": s.discussion, "parentId": s.question, "participantId": qwen }),
+        )
+        .unwrap();
+
+        assert_eq!(finished(&s, &gpt_reply["id"])["status"], "failed");
+        assert_eq!(finished(&s, &qwen_reply["id"])["status"], "complete");
+        assert_eq!(
+            post(&s, &qwen_reply["id"])["body"],
+            "Local models can join too."
+        );
+        assert_eq!(post(&s, &gpt_reply["id"])["parentId"], s.question);
+        assert_eq!(post(&s, &qwen_reply["id"])["parentId"], s.question);
+    }
+
+    #[test]
+    fn an_unused_connection_can_be_removed() {
+        let s = setup(&serve(vec![]));
+        let (endpoint, _) = local_model(&s, "http://127.0.0.1:9/v1");
+        invoke(
+            &s.w,
+            "remove_endpoint",
+            json!({ "providerId": endpoint["id"] }),
+        )
+        .unwrap();
+        let providers = invoke(&s.w, "providers", json!({})).unwrap();
+        assert_eq!(providers.as_array().unwrap().len(), 2);
+    }
+
     #[test]
     fn asking_without_a_key_explains_what_to_do() {
         let base = serve(vec![]);

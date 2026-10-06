@@ -6,11 +6,36 @@ Nimata's database.
 
 ## Supported
 
-| Provider                    | Since             | API used                                                    |
-| --------------------------- | ----------------- | ----------------------------------------------------------- |
-| OpenAI                      | Stage 3           | Responses API (`POST /responses`, streaming), `GET /models` |
-| Anthropic                   | Stage 4 (planned) | Messages API                                                |
-| OpenAI-compatible endpoints | Stage 4 (planned) | Chat Completions with a custom base URL                     |
+| Provider                      | API used                                                                    | Key      |
+| ----------------------------- | --------------------------------------------------------------------------- | -------- |
+| OpenAI                        | Responses API (`POST /responses`, streaming, `store: false`), `GET /models` | Required |
+| Anthropic                     | Messages API (`POST /messages`, streaming), `GET /models`                   | Required |
+| OpenAI-compatible connections | Chat Completions (`POST /chat/completions`, streaming), `GET /models`       | Optional |
+
+OpenAI-compatible connections cover local runners (Ollama at
+`http://localhost:11434/v1`, LM Studio at `http://localhost:1234/v1`,
+llama.cpp, vLLM) and hosted services that speak the same API (for example
+xAI or Qwen's compatible endpoints). Add as many as you like under
+**Add an OpenAI-compatible connection…**; each has its own name, endpoint
+address, optional key, and models. Gemini will get its own adapter later.
+
+Providers differ, and Nimata does not hide that: each kind declares what it
+can do (whether it needs a key, whether its endpoint can change, whether it
+reports token counts), and Settings offers only what applies.
+
+### Provider-specific details
+
+- **Anthropic:** replies may use up to 32,000 output tokens; a model that
+  allows fewer is asked again once with 8,192. Thinking is not shown, only
+  the reply text. A conversation must start and end with the user, so when
+  a thread starts with, or ends at, the model's own post, Nimata adds a
+  short bridging line. If Claude declines to answer, the reply fails with
+  "The model declined to answer this" and the partial text is not treated
+  as an answer.
+- **OpenAI-compatible:** Nimata asks for token counts
+  (`stream_options.include_usage`); a server that rejects that option is
+  asked again without it. Messages name the connection, for example "The
+  model qwen3:8b is not available at Ollama."
 
 ## Setting up a model
 
@@ -43,7 +68,9 @@ clicks:
    The line under the composer always says who will answer before you post.
 
 Every finished post also has **Ask GPT-5.6** (or **Ask…** with several
-models) to ask a model directly. The reply appears straight away as a new
+models, including **All of them**) to ask a model directly. When several
+models are asked, each answers as its own reply to the same post; one
+failing never affects the others. The reply appears straight away as a new
 post and its text streams in. **Stop** ends it early and keeps the text so
 far; **Retry** on a stopped or failed reply asks again as a new reply,
 keeping the old one.

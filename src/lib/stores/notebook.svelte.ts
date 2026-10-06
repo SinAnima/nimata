@@ -39,12 +39,13 @@ class Notebook {
 
   /** Models that can be asked to reply right now. */
   get askableModels(): ModelParticipant[] {
-    const withKey = new Set(
+    // A provider that needs a key can answer only once it has one.
+    const ready = new Set(
       this.providers
-        .filter((p) => p.key.source !== null)
+        .filter((p) => !p.capabilities.requiresKey || p.key.source !== null)
         .map((p) => p.provider.id),
     );
-    return this.models.filter((m) => m.enabled && withKey.has(m.providerId));
+    return this.models.filter((m) => m.enabled && ready.has(m.providerId));
   }
 
   composers = new Composers(api.saveDraft, (e) => this.report(e));

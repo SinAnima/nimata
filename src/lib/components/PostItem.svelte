@@ -100,6 +100,12 @@
     askMenuOpen = false;
     onAsk(participantId);
   }
+
+  /** Each enabled model answers separately, as sibling replies. */
+  function askAll(): void {
+    askMenuOpen = false;
+    for (const model of askableModels) onAsk(model.participant.id);
+  }
   const fullTime = (at: number) =>
     new Date(at).toLocaleString(undefined, {
       dateStyle: "full",
@@ -202,6 +208,13 @@
                 {model.participant.displayName}
               </button>
             {/each}
+            <button
+              type="button"
+              class="block min-h-10 w-full border-t border-rule px-4 text-left text-sm hover:bg-accent-soft"
+              onclick={askAll}
+            >
+              All of them
+            </button>
           </div>
         </details>
       {/if}

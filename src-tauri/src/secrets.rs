@@ -9,8 +9,9 @@ use serde::Serialize;
 /// Service name under which keys are stored in the credential store.
 pub const SERVICE: &str = "org.nimata.app";
 
-/// The environment variable read for OpenAI keys in development builds.
+/// Environment variables read for keys in development builds.
 pub const OPENAI_ENV: &str = "OPENAI_API_KEY";
+pub const ANTHROPIC_ENV: &str = "ANTHROPIC_API_KEY";
 
 pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, String>;
@@ -158,7 +159,14 @@ impl Keys {
     }
 
     fn environment_variable(&self, provider: &ProviderConfig) -> Option<&'static str> {
-        (self.development && provider.kind == ProviderKind::OpenAi).then_some(OPENAI_ENV)
+        if !self.development {
+            return None;
+        }
+        match provider.kind {
+            ProviderKind::OpenAi => Some(OPENAI_ENV),
+            ProviderKind::Anthropic => Some(ANTHROPIC_ENV),
+            ProviderKind::OpenAiCompatible => None,
+        }
     }
 
     /// The key to use for requests, and where it came from. A saved key
@@ -281,6 +289,36 @@ mod tests {
         assert_eq!(
             keys.status(&provider).unwrap().source,
             Some(KeySource::Environment)
+        );
+    }
+
+    #[test]
+    fn each_kind_reads_its_own_environment_variable() {
+        fn env(name: &str) -> Option<String> {
+            match name {
+                ANTHROPIC_ENV => Some("sk-ant-env-cdef".into()),
+                OPENAI_ENV => Some("sk-openai-env-abcd".into()),
+                _ => None,
+            }
+        }
+        let keys = Keys::new(Box::new(MemorySecretStore::default()), true, env);
+        let mut anthropic = openai();
+        anthropic.kind = ProviderKind::Anthropic;
+        assert_eq!(
+            keys.status(&anthropic).unwrap().environment_variable,
+            Some(ANTHROPIC_ENV)
+        );
+        assert_eq!(
+            keys.status(&anthropic).unwrap().hint.as_deref(),
+            Some("cdef")
+        );
+
+        let mut local = openai();
+        local.kind = ProviderKind::OpenAiCompatible;
+        assert_eq!(
+            keys.status(&local).unwrap().source,
+            None,
+            "no environment fallback for custom endpoints"
         );
     }
 

@@ -688,6 +688,105 @@ impl Repository for SqliteRepository {
             .ok_or(Error::NotFound("provider"))
     }
 
+    fn providers(&mut self) -> Result<Vec<ProviderConfig>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {PROVIDER_COLUMNS} FROM providers
+             ORDER BY CASE kind WHEN 'openai' THEN 0 WHEN 'anthropic' THEN 1 ELSE 2 END,
+                      created_at, rowid"
+        ))?;
+        let rows = stmt.query_map([], provider_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn add_provider(
+        &mut self,
+        kind: ProviderKind,
+        display_name: &str,
+        base_url: &str,
+        at: UnixMillis,
+    ) -> Result<ProviderConfig> {
+        if !crate::providers::capabilities(kind).multiple {
+            return Err(Error::Invalid(format!(
+                "there is only one {} connection",
+                kind.as_str()
+            )));
+        }
+        let name = clean_display_name(display_name)?;
+        let id = Uuid::now_v7();
+        self.conn.execute(
+            "INSERT INTO providers (id, kind, display_name, base_url, created_at, modified_at)
+             VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
+            params![id.to_string(), kind.as_str(), name, at.0],
+        )?;
+        match self.set_provider_base_url(id, Some(base_url), at) {
+            Ok(provider) if provider.base_url.is_some() => Ok(provider),
+            Ok(_) => {
+                self.conn
+                    .execute("DELETE FROM providers WHERE id = ?1", [id.to_string()])?;
+                Err(Error::Invalid(
+                    "an OpenAI-compatible connection needs its endpoint address".into(),
+                ))
+            }
+            Err(e) => {
+                self.conn
+                    .execute("DELETE FROM providers WHERE id = ?1", [id.to_string()])?;
+                Err(e)
+            }
+        }
+    }
+
+    fn rename_provider(
+        &mut self,
+        id: Uuid,
+        display_name: &str,
+        at: UnixMillis,
+    ) -> Result<ProviderConfig> {
+        let name = clean_display_name(display_name)?;
+        let changed = self.conn.execute(
+            "UPDATE providers SET display_name = ?2, modified_at = ?3 WHERE id = ?1",
+            params![id.to_string(), name, at.0],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound("provider"));
+        }
+        self.provider(id)
+    }
+
+    fn remove_provider(&mut self, id: Uuid) -> Result<()> {
+        let provider = self.provider(id)?;
+        if !crate::providers::capabilities(provider.kind).multiple {
+            return Err(Error::Invalid(format!(
+                "{} is built in and cannot be removed",
+                provider.display_name
+            )));
+        }
+        let wrote: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM posts WHERE author_id IN
+                (SELECT id FROM participants WHERE provider_id = ?1))",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        if wrote {
+            return Err(Error::Invalid(format!(
+                "models from {} have written posts, so it stays; turn its models off instead",
+                provider.display_name
+            )));
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM app_settings WHERE key = ?1 AND value IN
+                (SELECT id FROM participants WHERE provider_id = ?2)",
+            params![DEFAULT_MODEL_SETTING, id.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM participants WHERE provider_id = ?1",
+            [id.to_string()],
+        )?;
+        tx.execute("DELETE FROM providers WHERE id = ?1", [id.to_string()])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn set_provider_base_url(
         &mut self,
         id: Uuid,
