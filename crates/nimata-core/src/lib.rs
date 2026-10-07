@@ -7,6 +7,7 @@ pub mod domain;
 pub mod error;
 pub mod providers;
 pub mod repository;
+pub mod search;
 pub mod sqlite;
 pub mod time;
 

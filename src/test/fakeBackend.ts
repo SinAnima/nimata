@@ -18,8 +18,10 @@ import type {
   Post,
   ProviderConfig,
   Revision,
+  SearchResults,
   SentContext,
 } from "../lib/types";
+import { fold, highlightParts, MATCH_END, MATCH_START } from "../lib/search";
 
 type Args = Record<string, unknown>;
 
@@ -45,6 +47,7 @@ export class FakeBackend {
   drafts = new Map<string, Draft>();
   revisions: Revision[] = [];
   calls: { cmd: string; args: Args }[] = [];
+  recent: string[] = [];
   /** Backups written by backup_database, by path. */
   backups = new Map<string, Snapshot>();
   /** Files written by export_discussion, by path. */
@@ -188,6 +191,66 @@ export class FakeBackend {
     };
     this.posts.push(post);
     return post;
+  }
+
+  /**
+   * A simplified search: every word must begin a word of the post, and
+   * from:me limits to your posts. The Rust tests cover the full syntax.
+   */
+  search(query: string): SearchResults {
+    const tokens = query.split(/\s+/).filter(Boolean);
+    const mine = tokens.includes("from:me");
+    const words = tokens.filter((t) => t !== "from:me").map(fold);
+    const matches = (text: string) => {
+      const textWords = fold(text).match(/[\p{L}\p{N}]+/gu) ?? [];
+      return words.every((w) => textWords.some((t) => t.startsWith(w)));
+    };
+    const mark = (text: string) =>
+      highlightParts(text, words)
+        .map((p) => (p.match ? MATCH_START + p.text + MATCH_END : p.text))
+        .join("");
+    const visible = new Map(
+      this.discussions
+        .filter((d) => d.archivedAt === null)
+        .map((d) => [d.id, d]),
+    );
+    const name = (id: string) =>
+      id === this.me.id
+        ? this.me.displayName
+        : (this.models.find((m) => m.participant.id === id)?.participant
+            .displayName ?? "Someone");
+    return {
+      posts: this.posts
+        .filter(
+          (p) =>
+            p.deletedAt === null &&
+            visible.has(p.discussionId) &&
+            (!mine || p.authorId === this.me.id) &&
+            matches(p.body),
+        )
+        .map((p) => ({
+          postId: p.id,
+          discussionId: p.discussionId,
+          discussionTitle: visible.get(p.discussionId)!.title,
+          authorName: name(p.authorId),
+          createdAt: p.createdAt,
+          snippet: mark(p.body),
+        })),
+      morePosts: false,
+      discussions:
+        words.length === 0
+          ? []
+          : [...visible.values()]
+              .filter((d) => matches(d.title))
+              .map((d) => ({
+                discussionId: d.id,
+                title: mark(d.title),
+                lastActivityAt: d.updatedAt,
+                archived: false,
+              })),
+      warnings: [],
+      highlight: words,
+    };
   }
 
   view(id: string): DiscussionView {
@@ -726,6 +789,18 @@ export class FakeBackend {
         };
         return this.buildContext("unsent", String(args.participantId), unsent);
       }
+      case "search":
+        return this.search(String(args.query));
+      case "record_search": {
+        const query = String(args.query).trim();
+        this.recent = [query, ...this.recent.filter((q) => q !== query)];
+        return [...this.recent];
+      }
+      case "recent_searches":
+        return [...this.recent];
+      case "clear_recent_searches":
+        this.recent = [];
+        return null;
       case "reply_details":
         return this.generations.find((g) => g.postId === args.postId) ?? null;
       case "app_info":

@@ -8,6 +8,7 @@ use nimata_core::context::SentContext;
 use nimata_core::domain::PostStatus;
 use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
 use nimata_core::providers::{Capabilities, ModelInfo, capabilities};
+use nimata_core::search::SearchResults;
 use nimata_core::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Participant, Post, Repository,
     Revision, Timestamp, UnixMillis,
@@ -582,4 +583,34 @@ pub fn preview_context(
     };
     let target = unsent.id;
     generation::context_for(&mut *repo, discussion_id, target, &model, Some(unsent))
+}
+
+/// How many posts a search returns at most.
+const SEARCH_LIMIT: usize = 100;
+/// How many recent searches are offered.
+const RECENT_SEARCHES: usize = 8;
+
+#[tauri::command]
+pub fn search(query: String, state: State<'_, AppState>) -> CommandResult<SearchResults> {
+    let parsed = nimata_core::search::parse(&query);
+    state.repo()?.search(&parsed, SEARCH_LIMIT).map_err(text)
+}
+
+/// Remembers a search the person acted on, and returns the updated list.
+#[tauri::command]
+pub fn record_search(query: String, state: State<'_, AppState>) -> CommandResult<Vec<String>> {
+    let mut repo = state.repo()?;
+    repo.record_search(&query, UnixMillis::now())
+        .map_err(text)?;
+    repo.recent_searches(RECENT_SEARCHES).map_err(text)
+}
+
+#[tauri::command]
+pub fn recent_searches(state: State<'_, AppState>) -> CommandResult<Vec<String>> {
+    state.repo()?.recent_searches(RECENT_SEARCHES).map_err(text)
+}
+
+#[tauri::command]
+pub fn clear_recent_searches(state: State<'_, AppState>) -> CommandResult<()> {
+    state.repo()?.clear_recent_searches().map_err(text)
 }

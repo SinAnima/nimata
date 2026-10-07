@@ -9,6 +9,7 @@
   } from "../stream";
   import { clock } from "../stores/clock.svelte";
   import { notebook } from "../stores/notebook.svelte";
+  import { search } from "../stores/search.svelte";
   import PostItem from "./PostItem.svelte";
   import Composer from "./Composer.svelte";
   import ContextDialog from "./ContextDialog.svelte";
@@ -49,6 +50,14 @@
     clearTimeout(flashTimer);
     flashTimer = setTimeout(() => (flashingId = null), 1200);
   }
+
+  // Show the post a search result pointed to, once it is on screen.
+  $effect(() => {
+    const id = search.target;
+    if (id === null || !postsById.has(id)) return;
+    search.target = null;
+    void tick().then(() => showPost(id));
+  });
 
   async function reply(id: Uuid): Promise<void> {
     notebook.composers.setReplyTo(view.discussion.id, id);

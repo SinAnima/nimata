@@ -41,6 +41,15 @@
       nav.startNew();
       return;
     }
+    const findKey = hasModifier(event) && event.key.toLowerCase() === "f";
+    if (findKey || (event.key === "/" && !isTypingTarget(event.target))) {
+      event.preventDefault();
+      // On phones the search field is on the discussions screen.
+      if (!matchMedia("(min-width: 48rem)").matches) nav.back();
+      await tick();
+      document.querySelector<HTMLInputElement>("[data-search]")?.focus();
+      return;
+    }
     if (
       isTypingTarget(event.target) ||
       event.metaKey ||

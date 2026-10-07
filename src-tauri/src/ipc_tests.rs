@@ -115,6 +115,36 @@ fn domain_errors_arrive_as_readable_messages() {
 }
 
 #[test]
+fn search_finds_posts_and_remembers_queries() {
+    let w = app();
+    invoke(
+        &w,
+        "start_discussion",
+        json!({ "title": "Νήματα", "body": "Could Datalog replace the Oracle rules?" }),
+    )
+    .unwrap();
+    let results = invoke(&w, "search", json!({ "query": "datal from:me" })).unwrap();
+    assert_eq!(results["posts"].as_array().unwrap().len(), 1);
+    assert_eq!(results["posts"][0]["discussionTitle"], "Νήματα");
+    assert_eq!(
+        results["posts"][0]["snippet"],
+        "Could \u{E000}Datalog\u{E001} replace the Oracle rules?"
+    );
+    assert_eq!(results["highlight"], json!(["datal"]));
+    let titles = invoke(&w, "search", json!({ "query": "νηματα" })).unwrap();
+    assert_eq!(titles["discussions"][0]["title"], "\u{E000}Νήματα\u{E001}");
+
+    let warned = invoke(&w, "search", json!({ "query": "after:soon" })).unwrap();
+    assert_eq!(warned["warnings"].as_array().unwrap().len(), 1);
+
+    invoke(&w, "record_search", json!({ "query": "datalog" })).unwrap();
+    let recent = invoke(&w, "record_search", json!({ "query": "oracle" })).unwrap();
+    assert_eq!(recent, json!(["oracle", "datalog"]));
+    invoke(&w, "clear_recent_searches", json!({})).unwrap();
+    assert_eq!(invoke(&w, "recent_searches", json!({})).unwrap(), json!([]));
+}
+
+#[test]
 fn app_info_and_local_user_are_available() {
     let w = app();
     let info = invoke(&w, "app_info", json!({})).unwrap();

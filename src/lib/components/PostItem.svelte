@@ -12,6 +12,8 @@
   import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
   import { errorMessage, postRevisions, replyDetails } from "../api";
   import { showContext } from "../stores/contextView.svelte";
+  import { search } from "../stores/search.svelte";
+  import { highlightParts } from "../search";
   import ParticipantMark from "./ParticipantMark.svelte";
 
   interface Props {
@@ -79,6 +81,11 @@
     contextPosts,
     onShowPost,
   }: Props = $props();
+
+  /** Words from the search that opened this discussion. */
+  const searchTerms = $derived(
+    search.highlightIn === post.discussionId ? search.highlight : [],
+  );
 
   let showDetails = $state(false);
   let revisions: Revision[] | null = $state(null);
@@ -454,7 +461,13 @@
         class="mt-2 max-w-[68ch] space-y-3 font-serif text-[1.0625rem] leading-[1.6]"
       >
         {#each paragraphs(post.body) as paragraph, i (i)}
-          <p>{paragraph}</p>
+          <p>
+            {#each highlightParts(paragraph, searchTerms) as part, j (j)}
+              {#if part.match}<mark class="rounded-sm bg-flash text-ink"
+                  >{part.text}</mark
+                >{:else}{part.text}{/if}
+            {/each}
+          </p>
         {/each}
       </div>
     {/if}
