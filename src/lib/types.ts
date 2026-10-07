@@ -193,3 +193,34 @@ export interface AppInfo {
   databasePath: string | null;
   platform: string;
 }
+
+/** A post that matched a search. */
+export interface PostHit {
+  postId: Uuid;
+  discussionId: Uuid;
+  discussionTitle: string;
+  authorName: string;
+  createdAt: UnixMillis;
+  /** Text around the match; matches are between U+E000 and U+E001. */
+  snippet: string;
+}
+
+/** A discussion whose title matched a search. */
+export interface DiscussionHit {
+  discussionId: Uuid;
+  /** The title, with matches marked like snippets. */
+  title: string;
+  lastActivityAt: UnixMillis;
+  archived: boolean;
+}
+
+export interface SearchResults {
+  posts: PostHit[];
+  /** More posts matched than were returned. */
+  morePosts: boolean;
+  discussions: DiscussionHit[];
+  /** Parts of the query that could not be used, explained. */
+  warnings: string[];
+  /** Words and phrases to highlight in a discussion opened from a result. */
+  highlight: string[];
+}

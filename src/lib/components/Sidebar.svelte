@@ -3,6 +3,8 @@
   import { dayGroup, friendlyTime, type DayGroup } from "../time";
   import { MODIFIER_LABEL } from "../keys";
   import { clock } from "../stores/clock.svelte";
+  import { search } from "../stores/search.svelte";
+  import SearchResults from "./SearchResults.svelte";
 
   interface Props {
     discussions: DiscussionSummary[];
@@ -23,6 +25,31 @@
     onFilter,
     onSettings,
   }: Props = $props();
+
+  /** Recent searches show while the empty search field has focus. */
+  let searchFocused = $state(false);
+  const showRecent = $derived(
+    searchFocused && !search.active && search.recent.length > 0,
+  );
+
+  function onSearchKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      search.clear();
+      (event.currentTarget as HTMLInputElement).blur();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      void search.run();
+    } else if (event.key === "ArrowDown" && search.results) {
+      // Into the results, then Tab or arrows within them.
+      event.preventDefault();
+      document
+        .querySelector<HTMLButtonElement>(
+          "[aria-label='Search results'] li button",
+        )
+        ?.focus();
+    }
+  }
 
   const groups = $derived.by(() => {
     const order: DayGroup[] = ["Today", "Yesterday", "Earlier"];
@@ -62,7 +89,83 @@
     </button>
   </header>
 
-  {#if filter === "archived"}
+  <div class="px-5 pb-2" role="search">
+    <input
+      type="search"
+      data-search
+      class="block min-h-10 w-full rounded border border-rule bg-surface px-3 text-base placeholder:text-muted focus:border-accent focus:outline-none"
+      placeholder="Search everything"
+      aria-label="Search all discussions"
+      title="Search all discussions ({MODIFIER_LABEL}F)"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      value={search.query}
+      oninput={(e) => search.type(e.currentTarget.value)}
+      onkeydown={onSearchKeydown}
+      onfocus={() => {
+        searchFocused = true;
+        void search.loadRecent();
+      }}
+      onblur={() => (searchFocused = false)}
+    />
+  </div>
+
+  {#if search.active}
+    <div class="flex items-center justify-between px-5">
+      <span class="text-sm text-muted" aria-live="polite">
+        {#if search.results}
+          {search.results.posts.length + search.results.discussions.length === 0
+            ? "No matches"
+            : `${search.results.posts.length}${search.results.morePosts ? "+" : ""} posts, ${search.results.discussions.length} discussions`}
+        {:else}
+          Searching…
+        {/if}
+      </span>
+      <button
+        type="button"
+        class="min-h-10 rounded px-1 text-sm text-accent"
+        onclick={() => {
+          search.clear();
+          document.querySelector<HTMLInputElement>("[data-search]")?.blur();
+        }}
+      >
+        Close search
+      </button>
+    </div>
+  {:else if showRecent}
+    <section aria-labelledby="recent-searches" class="pb-1">
+      <div class="flex items-center justify-between px-5">
+        <h2 id="recent-searches" class="text-sm font-medium text-muted">
+          Recent searches
+        </h2>
+        <button
+          type="button"
+          class="min-h-10 rounded px-1 text-sm text-muted hover:text-ink"
+          onpointerdown={(e) => e.preventDefault()}
+          onclick={() => search.clearRecent()}
+        >
+          Clear
+        </button>
+      </div>
+      <ul>
+        {#each search.recent as query (query)}
+          <li>
+            <button
+              type="button"
+              class="block min-h-10 w-full truncate px-5 text-left text-sm hover:bg-accent-soft/60"
+              onpointerdown={(e) => e.preventDefault()}
+              onclick={() => search.useRecent(query)}
+            >
+              {query}
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
+  {#if filter === "archived" && !search.active}
     <div class="flex items-center justify-between px-5 pb-1">
       <h2 class="text-sm font-medium">Archived</h2>
       <button
@@ -76,7 +179,13 @@
   {/if}
 
   <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-2">
-    {#if discussions.length === 0}
+    {#if search.active}
+      {#if search.results}
+        <SearchResults results={search.results} {selectedId} />
+      {/if}
+    {:else if showRecent}
+      <!-- Recent searches are shown above. -->
+    {:else if discussions.length === 0}
       <div class="px-5 pt-6">
         {#if filter === "active"}
           <p class="font-serif text-lg">No discussions yet.</p>
@@ -97,7 +206,7 @@
       </div>
     {/if}
 
-    {#each groups as group (group.name)}
+    {#each search.active || showRecent ? [] : groups as group (group.name)}
       <section aria-labelledby="group-{group.name}">
         <h2
           id="group-{group.name}"
@@ -132,7 +241,7 @@
     {/each}
   </div>
 
-  {#if filter === "active"}
+  {#if filter === "active" && !search.active}
     <footer
       class="border-t border-rule px-5 pt-1 pb-[max(0.25rem,env(safe-area-inset-bottom))]"
     >

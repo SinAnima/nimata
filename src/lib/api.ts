@@ -18,6 +18,7 @@ import type {
   Participant,
   Post,
   Revision,
+  SearchResults,
   SentContext,
   UnixMillis,
   Uuid,
@@ -219,6 +220,23 @@ export function defaultModel(): Promise<Uuid | null> {
 
 export function setDefaultModel(participantId: Uuid | null): Promise<void> {
   return invoke("set_default_model", { participantId });
+}
+
+export function search(query: string): Promise<SearchResults> {
+  return invoke("search", { query });
+}
+
+/** Remembers a search that was used; returns the recent searches. */
+export function recordSearch(query: string): Promise<string[]> {
+  return invoke("record_search", { query });
+}
+
+export function recentSearches(): Promise<string[]> {
+  return invoke("recent_searches");
+}
+
+export function clearRecentSearches(): Promise<void> {
+  return invoke("clear_recent_searches");
 }
 
 export function onPostDelta(

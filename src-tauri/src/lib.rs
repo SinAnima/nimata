@@ -43,6 +43,10 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::update_endpoint,
         commands::remove_endpoint,
         commands::preview_context,
+        commands::search,
+        commands::record_search,
+        commands::recent_searches,
+        commands::clear_recent_searches,
     ])
 }
 

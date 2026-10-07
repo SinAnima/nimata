@@ -17,6 +17,7 @@ use crate::domain::{
 };
 use crate::error::{Error, Result};
 use crate::repository::{GenerationOutcome, INTERRUPTED, Repository};
+use crate::search::{DiscussionHit, PostHit, SearchQuery, SearchResults};
 use crate::time::{Timestamp, UnixMillis};
 
 /// Schema migrations, applied in order. The schema version is the number
@@ -27,7 +28,14 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_model_participants.sql"),
     include_str!("../migrations/0004_aliases_and_settings.sql"),
     include_str!("../migrations/0005_context_references.sql"),
+    include_str!("../migrations/0006_search.sql"),
 ];
+
+/// About how many words of a post a search result shows.
+const SNIPPET_WORDS: usize = 30;
+
+/// How many recent searches are kept.
+const RECENT_SEARCHES: usize = 10;
 
 const DEFAULT_MODEL_SETTING: &str = "default_model";
 
@@ -59,6 +67,7 @@ impl SqliteRepository {
 
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        define_functions(&conn)?;
         migrate(&mut conn)?;
         Ok(Self { conn })
     }
@@ -104,6 +113,15 @@ impl SqliteRepository {
         )?;
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut self.conn)?;
+        // The search indexes are keyed by rowid; rebuild them so they match
+        // the restored rows exactly.
+        self.conn.execute_batch(
+            "DELETE FROM posts_fts;
+             INSERT INTO posts_fts (rowid, body) SELECT rowid, nimata_fold(body) FROM posts;
+             DELETE FROM discussions_fts;
+             INSERT INTO discussions_fts (rowid, title)
+                 SELECT rowid, nimata_fold(title) FROM discussions;",
+        )?;
         check_database(&self.conn, "the restored database")
     }
 
@@ -236,6 +254,19 @@ fn validate_backup(src: &Path) -> Result<()> {
             supported: SCHEMA_VERSION,
         });
     }
+    Ok(())
+}
+
+/// SQL functions the schema relies on. The search index triggers call
+/// `nimata_fold`, so writing posts needs a connection opened by Nimata.
+fn define_functions(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "nimata_fold",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(crate::search::fold(&ctx.get::<String>(0)?)),
+    )?;
     Ok(())
 }
 
@@ -1243,6 +1274,221 @@ impl Repository for SqliteRepository {
     fn discussion_of_post(&mut self, post_id: Uuid) -> Result<(Uuid, Option<Uuid>)> {
         let post = self.post(post_id)?;
         Ok((post.discussion_id, post.parent_id))
+    }
+
+    fn search(&mut self, query: &SearchQuery, limit: usize) -> Result<SearchResults> {
+        let mut results = SearchResults {
+            warnings: query.warnings.clone(),
+            highlight: query.highlight_terms(),
+            ..Default::default()
+        };
+        if query.is_empty() {
+            return Ok(results);
+        }
+
+        // People and models are found by the beginning of their name or alias.
+        let me = self.local_user()?;
+        let models = self.model_participants()?;
+        let mut names: HashMap<Uuid, String> = HashMap::new();
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, display_name FROM participants")?;
+        for row in stmt.query_map([], |row| Ok((uuid_at(row, 0)?, row.get::<_, String>(1)?)))? {
+            let (id, name) = row?;
+            names.insert(id, name);
+        }
+        drop(stmt);
+        let mut authors: Vec<Uuid> = Vec::new();
+        for wanted in &query.from {
+            let matches_name = |name: &str| {
+                name.to_lowercase().starts_with(wanted.as_str())
+                    || automatic_alias(name).starts_with(wanted.as_str())
+            };
+            let before = authors.len();
+            if ["me", "i", "myself"].contains(&wanted.as_str()) || matches_name(&me.display_name) {
+                authors.push(me.id);
+            }
+            for model in &models {
+                if matches_name(&model.participant.display_name)
+                    || model.aliases.iter().any(|a| a.starts_with(wanted.as_str()))
+                {
+                    authors.push(model.participant.id);
+                }
+            }
+            if authors.len() == before {
+                results.warnings.push(format!(
+                    "No one is called \"{wanted}\", so nothing matches from:{wanted}."
+                ));
+                return Ok(results);
+            }
+        }
+
+        let fts = query.fts();
+        let like = |text: &str| {
+            let escaped = text
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        };
+        let mut conditions = vec![
+            "p.deleted_at IS NULL".to_string(),
+            "d.deleted_at IS NULL".to_string(),
+            "p.body != ''".to_string(),
+        ];
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(fts) = &fts {
+            conditions.push("posts_fts MATCH ?".into());
+            args.push(Box::new(fts.clone()));
+        }
+        if !query.include_archived {
+            conditions.push("d.archived_at IS NULL".into());
+        }
+        if !authors.is_empty() {
+            conditions.push(format!(
+                "p.author_id IN ({})",
+                vec!["?"; authors.len()].join(", ")
+            ));
+            for id in &authors {
+                args.push(Box::new(id.to_string()));
+            }
+        }
+        if let Some(after) = query.after {
+            conditions.push("p.created_at >= ?".into());
+            args.push(Box::new(after.0));
+        }
+        if let Some(before) = query.before {
+            conditions.push("p.created_at < ?".into());
+            args.push(Box::new(before.0));
+        }
+        if let Some(discussion) = &query.discussion {
+            conditions.push("lower(d.title) LIKE ? ESCAPE '\\'".into());
+            args.push(Box::new(like(discussion)));
+        }
+        let (source, order) = match fts {
+            Some(_) => (
+                // CROSS JOIN keeps the index as the outer loop, read newest
+                // first; otherwise SQLite may walk posts by author or date
+                // and test each one against the index, which is far slower.
+                "posts_fts CROSS JOIN posts p ON p.rowid = posts_fts.rowid",
+                // Newest first lets SQLite stop after `limit` matches; ranking
+                // by relevance would score every match, and a common word
+                // matches most posts. Rowids follow creation order.
+                "posts_fts.rowid DESC",
+            ),
+            None => ("posts p", "p.created_at DESC"),
+        };
+        let sql = format!(
+            "SELECT p.id, p.discussion_id, d.title, p.author_id, p.created_at, p.body
+             FROM {source} CROSS JOIN discussions d ON d.id = p.discussion_id
+             WHERE {}
+             ORDER BY {order}
+             LIMIT ?",
+            conditions.join(" AND ")
+        );
+        args.push(Box::new(limit as i64 + 1));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((
+                uuid_at(row, 0)?,
+                uuid_at(row, 1)?,
+                row.get::<_, String>(2)?,
+                uuid_at(row, 3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        for row in rows {
+            let (post_id, discussion_id, title, author, created_at, text) = row?;
+            results.posts.push(PostHit {
+                post_id,
+                discussion_id,
+                discussion_title: title,
+                author_name: names
+                    .get(&author)
+                    .cloned()
+                    .unwrap_or_else(|| "Someone".into()),
+                created_at: UnixMillis(created_at),
+                snippet: crate::search::snippet(&text, query, SNIPPET_WORDS),
+            });
+        }
+        drop(stmt);
+        if results.posts.len() > limit {
+            results.posts.truncate(limit);
+            results.more_posts = true;
+        }
+
+        // Titles only answer text searches without author or date filters.
+        let titles_apply = query.from.is_empty() && query.after.is_none() && query.before.is_none();
+        if let (Some(fts), true) = (fts, titles_apply) {
+            let mut sql = String::from(
+                "SELECT d.id, d.title,
+                        d.updated_at, d.archived_at IS NOT NULL
+                 FROM discussions_fts JOIN discussions d ON d.rowid = discussions_fts.rowid
+                 WHERE discussions_fts MATCH ?1 AND d.deleted_at IS NULL",
+            );
+            if !query.include_archived {
+                sql.push_str(" AND d.archived_at IS NULL");
+            }
+            if query.discussion.is_some() {
+                sql.push_str(" AND lower(d.title) LIKE ?2 ESCAPE '\\'");
+            }
+            sql.push_str(" ORDER BY bm25(discussions_fts), d.updated_at DESC LIMIT 10");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let map = |row: &Row| {
+                Ok(DiscussionHit {
+                    discussion_id: uuid_at(row, 0)?,
+                    title: crate::search::mark(&row.get::<_, String>(1)?, query),
+                    last_activity_at: UnixMillis(row.get(2)?),
+                    archived: row.get(3)?,
+                })
+            };
+            results.discussions = match query.discussion.as_deref().map(like) {
+                Some(pattern) => stmt
+                    .query_map(params![fts, pattern], map)?
+                    .collect::<rusqlite::Result<_>>()?,
+                None => stmt
+                    .query_map(params![fts], map)?
+                    .collect::<rusqlite::Result<_>>()?,
+            };
+        }
+        Ok(results)
+    }
+
+    fn record_search(&mut self, query: &str, at: UnixMillis) -> Result<()> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            // Always strictly the latest, even within one millisecond.
+            "INSERT INTO recent_searches (query, last_used_at)
+             VALUES (?1, MAX(?2, (SELECT COALESCE(MAX(last_used_at), 0) + 1 FROM recent_searches)))
+             ON CONFLICT (query) DO UPDATE SET last_used_at = excluded.last_used_at",
+            params![query, at.0],
+        )?;
+        tx.execute(
+            "DELETE FROM recent_searches WHERE query NOT IN
+                (SELECT query FROM recent_searches ORDER BY last_used_at DESC LIMIT ?1)",
+            [RECENT_SEARCHES as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn recent_searches(&mut self, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT query FROM recent_searches ORDER BY last_used_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn clear_recent_searches(&mut self) -> Result<()> {
+        self.conn.execute("DELETE FROM recent_searches", [])?;
+        Ok(())
     }
 
     fn recover_interrupted(&mut self, at: UnixMillis) -> Result<usize> {

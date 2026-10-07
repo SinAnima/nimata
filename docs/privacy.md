@@ -11,6 +11,9 @@ device.
   [providers.md](providers.md#what-a-model-is-sent)). OpenAI requests ask
   OpenAI not to store the conversation. With an OpenAI-compatible
   connection, the thread goes to the server you configured.
+- **Search is local.** The search index lives inside the same database, and
+  searches never leave the device. Recently used searches are remembered
+  there too, and can be cleared from the search field.
 - **Exports and backups are yours.** They are written only where you
   choose.
 

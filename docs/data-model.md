@@ -18,10 +18,16 @@ transaction. Nimata refuses to open a database from a newer version, a
 damaged database, or a SQLite file that is not a Nimata database, rather
 than risk changing it.
 
+Since version 6 the schema relies on one SQL function Nimata defines on
+each connection, `nimata_fold()`, which the search index triggers call.
+Reading works with any SQLite tool; writing posts or discussion titles
+from outside Nimata fails with "no such function: nimata_fold" rather than
+leave the search index out of date.
+
 Migration tests load frozen databases from earlier versions
 (`crates/nimata-core/tests/fixtures/`) and check that nothing is lost.
 
-## Tables (schema version 5)
+## Tables (schema version 6)
 
 ### participants
 
@@ -145,7 +151,8 @@ moved into place under the chosen name.
 Restoring checks that the file is an undamaged Nimata database from this or
 an earlier version, keeps a safety copy of the current data in the
 `safety-copies` folder inside the data folder, replaces the data, and
-migrates it if it came from an older version.
+migrates it if it came from an older version. The search indexes are then rebuilt
+from the restored posts.
 
 If the database cannot be opened at startup (damaged, or not a Nimata
 database), Nimata says why and offers to restore a backup. The unusable file
@@ -226,3 +233,25 @@ array). `generations.sent_json` records exactly what a request sent: the
 model, instructions, each message with its source (`thread` or `context`)
 and post IDs, what was left out and why (`deleted`, `unfinished`,
 `trimmed`), and the size estimate and budget.
+
+## Search (schema version 6)
+
+`posts_fts` and `discussions_fts` are FTS5 full-text indexes over post
+bodies and discussion titles. They hold text folded by `nimata_fold()`
+(lowercase, accents removed in any script) and store no text of their own;
+rows are matched to `posts` and `discussions` by `rowid`, and triggers keep
+them current on every insert, edit, streamed update, and delete. Deleted
+posts have empty bodies, so they leave the index. `posts_fts` also keeps
+prefix indexes for two and three letters.
+
+### recent_searches
+
+| column       | meaning                     |
+| ------------ | --------------------------- |
+| query        | the search text, as typed   |
+| last_used_at | when it was last used (UTC) |
+
+Only searches whose results were opened are remembered, the ten most
+recent. They stay on this device and are not part of discussion exports.
+
+See [search.md](search.md) for the query syntax.

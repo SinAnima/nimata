@@ -227,6 +227,21 @@ pub trait Repository {
     /// Marks requests that were still running when Nimata last stopped as
     /// failed, keeping any text they had received. Returns how many.
     fn recover_interrupted(&mut self, at: UnixMillis) -> Result<usize>;
+
+    /// Searches posts and discussion titles. Deleted posts and discussions
+    /// never match; archived ones only with `in:archived`.
+    fn search(
+        &mut self,
+        query: &crate::search::SearchQuery,
+        limit: usize,
+    ) -> Result<crate::search::SearchResults>;
+
+    /// Remembers a search, most recent first.
+    fn record_search(&mut self, query: &str, at: UnixMillis) -> Result<()>;
+
+    fn recent_searches(&mut self, limit: usize) -> Result<Vec<String>>;
+
+    fn clear_recent_searches(&mut self) -> Result<()>;
 }
 
 /// How a model reply ended.

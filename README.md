@@ -25,7 +25,9 @@ as an ordinary post that keeps its place in the thread. Models from OpenAI,
 Anthropic, and any OpenAI-compatible server (including local ones such as
 Ollama) can take part in the same discussion. Edit posts while keeping their
 earlier versions, delete posts or discussions, rename and archive
-discussions, and keep unsent drafts. Everything is stored in a local SQLite
+discussions, and keep unsent drafts. Search every discussion at once, with
+filters for author, date, and discussion (see
+[docs/search.md](docs/search.md)). Everything is stored in a local SQLite
 database that you can back up and restore; API keys stay in the system
 keychain.
 
@@ -35,11 +37,12 @@ Keyboard shortcuts on desktop:
 | --------- | ----------------------------------- |
 | Cmd+N     | New discussion                      |
 | Cmd+Enter | Post, or start the discussion       |
+| Cmd+F, /  | Search all discussions              |
 | J / K     | Next / previous post                |
 | R         | Reply to the focused post           |
 | E         | Edit the focused post (yours)       |
 | C         | Include the focused post as context |
-| Esc       | Cancel the reply target             |
+| Esc       | Cancel the reply target, or search  |
 
 ## Principles
 

@@ -277,3 +277,52 @@ fn a_version_4_database_upgrades_with_aliases_and_drafts_intact() {
         .unwrap();
     assert_eq!(with_context.context_ids, vec![reply.id]);
 }
+
+#[test]
+fn a_version_5_database_is_searchable_after_upgrading() {
+    let dir = TempDir::new().unwrap();
+    let path = database_from("tests/fixtures/schema_v5.sql", &dir);
+    let mut repo = SqliteRepository::open(&path).unwrap();
+    let parse = nimata_core::search::parse;
+
+    let r = repo.search(&parse("stratification"), 10).unwrap();
+    assert_eq!(
+        r.posts.len(),
+        1,
+        "existing posts are indexed by the upgrade"
+    );
+    assert_eq!(
+        repo.search(&parse("mapping"), 10)
+            .unwrap()
+            .discussions
+            .len(),
+        1
+    );
+    let post = repo
+        .get_discussion(id("01a109b0-0000-7000-8000-000000000001"))
+        .unwrap()
+        .posts[1]
+        .clone();
+    assert_eq!(
+        post.context_ids,
+        vec![id("01a109b1-0000-7000-8000-000000000001")]
+    );
+
+    // New posts are indexed as they are written.
+    let me = repo.local_user().unwrap().id;
+    repo.add_post(
+        post.discussion_id,
+        Some(post.id),
+        me,
+        "Materialised views next.",
+        nimata_core::Timestamp {
+            at: UnixMillis(1_791_500_000_000),
+            offset_minutes: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        repo.search(&parse("materialised"), 10).unwrap().posts.len(),
+        1
+    );
+}

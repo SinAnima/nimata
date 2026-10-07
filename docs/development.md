@@ -37,15 +37,25 @@ npm run tauri android dev         # Android emulator or device
 
 ### iOS simulator
 
-Start the simulator before `tauri ios dev`. Tauri installs the app without
-booting the simulator, so on a simulator that is not running the install
-fails at the very end ("Unable to lookup in current state: Shutdown"), and
-the Simulator window keeps showing whatever app ran there last:
+Name the simulator when starting:
 
 ```sh
-xcrun simctl boot "iPhone 17"; open -a Simulator
-npm run tauri ios dev -- "iPhone 17"
+npm run tauri ios dev "iPhone 17 Pro"
 ```
+
+Always run the CLI as `npm run tauri`, not `npx tauri`: it goes through
+`scripts/tauri.mjs`, which fixes two things before Tauri starts.
+
+- **It starts the named simulator** and waits until it can launch apps.
+  Tauri installs without booting, so on a simulator that is shut down the
+  install fails ("Unable to lookup in current state: Shutdown"), and the
+  Simulator window keeps showing whatever app ran there last. Without a
+  name, start a simulator in the Simulator app first.
+- **It puts rustup's `~/.cargo/bin` first on `PATH`.** Tauri passes its
+  `PATH` on to the Xcode and Gradle build steps, and if another Rust
+  (asdf, Homebrew) comes first there, mobile builds fail with "can't find
+  crate for `core`": that toolchain has no iOS or Android standard library,
+  and only rustup reads `rust-toolchain.toml`.
 
 To see the app's own log, including Rust panics:
 
