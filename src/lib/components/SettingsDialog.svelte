@@ -182,6 +182,31 @@
           Restore from backup…
         </button>
       </div>
+
+      <h3 class="mt-6 font-medium">Export and import</h3>
+      <p class="mt-1 text-sm leading-relaxed text-muted">
+        An archive holds every discussion in an open, documented format that
+        other programs can read. Importing one adds only what is not here
+        already, so it is safe to import the same file twice. Imports also
+        accept a ChatGPT data export: the zip from ChatGPT, or the
+        conversations.json inside it.
+      </p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          class="min-h-10 rounded border border-rule px-3 text-sm font-medium text-accent hover:bg-accent-soft"
+          onclick={() => notebook.exportArchive()}
+        >
+          Export all discussions…
+        </button>
+        <button
+          type="button"
+          class="min-h-10 rounded border border-rule px-3 text-sm hover:bg-accent-soft"
+          onclick={() => notebook.importFile()}
+        >
+          Import…
+        </button>
+      </div>
       {#if notebook.status}
         <p class="mt-2 text-sm break-all text-muted" role="status">
           {notebook.status}

@@ -4,7 +4,9 @@ The local SQLite database (`nimata.sqlite3` in the app data folder) is the
 authoritative record of a user's discussions. It is designed to stay
 readable with ordinary tools such as the `sqlite3` command-line shell:
 
-- IDs are UUIDv7 stored as hyphenated text. They are generated on the
+- IDs are UUIDv7 stored as hyphenated text (except imports from ChatGPT,
+  whose IDs are UUIDv5 derived from ChatGPT's; see
+  [archive-format.md](archive-format.md#chatgpt)). They are generated on the
   device, so records can be created offline and merged later without
   coordination.
 - Times are integers: UTC Unix milliseconds.

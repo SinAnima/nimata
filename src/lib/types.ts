@@ -224,3 +224,25 @@ export interface SearchResults {
   /** Words and phrases to highlight in a discussion opened from a result. */
   highlight: string[];
 }
+
+export type ImportSource = "nimataDiscussion" | "nimataArchive" | "chatGpt";
+
+export interface ImportOutcome {
+  discussionId: Uuid;
+  title: string;
+  result: "added" | "updated" | "unchanged" | "skippedDeleted";
+  postsAdded: number;
+  postsPresent: number;
+}
+
+export interface ImportReport {
+  source: ImportSource;
+  outcomes: ImportOutcome[];
+  /** Discussions that could not be imported, with the reason. */
+  failures: string[];
+}
+
+export interface ArchiveExport {
+  path: string;
+  discussions: number;
+}

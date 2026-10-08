@@ -2,9 +2,12 @@
 
 pub mod archive;
 pub mod attachments;
+pub mod chatgpt;
 pub mod context;
 pub mod domain;
 pub mod error;
+pub mod import;
+pub mod markdown;
 pub mod providers;
 pub mod repository;
 pub mod search;

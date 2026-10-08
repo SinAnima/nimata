@@ -27,7 +27,9 @@ Ollama) can take part in the same discussion. Edit posts while keeping their
 earlier versions, delete posts or discussions, rename and archive
 discussions, and keep unsent drafts. Search every discussion at once, with
 filters for author, date, and discussion (see
-[docs/search.md](docs/search.md)). Everything is stored in a local SQLite
+[docs/search.md](docs/search.md)). Export a discussion as JSON or Markdown, export
+everything as an open archive, and import archives or your ChatGPT history
+(see [docs/archive-format.md](docs/archive-format.md)). Everything is stored in a local SQLite
 database that you can back up and restore; API keys stay in the system
 keychain.
 

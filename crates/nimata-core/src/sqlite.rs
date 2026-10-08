@@ -9,6 +9,7 @@ use std::path::Path;
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params};
 use uuid::Uuid;
 
+use crate::archive::{DiscussionArchive, parse_time};
 use crate::domain::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Generation,
     GenerationStatus, ModelParticipant, Participant, ParticipantKind, Post, PostStatus,
@@ -16,6 +17,7 @@ use crate::domain::{
     clean_display_name, clean_title, excerpt, title_from_body,
 };
 use crate::error::{Error, Result};
+use crate::import::{ImportOutcome, ImportResult};
 use crate::repository::{GenerationOutcome, INTERRUPTED, Repository};
 use crate::search::{DiscussionHit, PostHit, SearchQuery, SearchResults};
 use crate::time::{Timestamp, UnixMillis};
@@ -1491,6 +1493,217 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
+    fn import_discussion(
+        &mut self,
+        archive: &DiscussionArchive,
+        at: UnixMillis,
+    ) -> Result<ImportOutcome> {
+        let me = self.local_user()?.id;
+        let tx = self.conn.transaction()?;
+        let discussion_id = archive.discussion.id;
+        let existing: Option<(Option<i64>, i64)> = tx
+            .query_row(
+                "SELECT deleted_at, updated_at FROM discussions WHERE id = ?1",
+                [discussion_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let outcome = |result, posts_added, posts_present| ImportOutcome {
+            discussion_id,
+            title: archive.discussion.title.clone(),
+            result,
+            posts_added,
+            posts_present,
+        };
+        if let Some((Some(_), _)) = existing {
+            return Ok(outcome(ImportResult::SkippedDeleted, 0, 0));
+        }
+
+        // Authors: known IDs stay; the exporter becomes the local user.
+        let mut authors: HashMap<Uuid, Uuid> = HashMap::new();
+        for p in &archive.participants {
+            let known: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM participants WHERE id = ?1)",
+                [p.id.to_string()],
+                |row| row.get(0),
+            )?;
+            let id = if known {
+                p.id
+            } else if p.local_user && p.kind == ParticipantKind::Human {
+                me
+            } else {
+                let name = clean_display_name(&p.display_name)
+                    .unwrap_or_else(|_| p.display_name.trim().chars().take(80).collect());
+                let name = if name.is_empty() {
+                    "Someone".to_string()
+                } else {
+                    name
+                };
+                tx.execute(
+                    "INSERT INTO participants (id, kind, display_name, provider, model)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        p.id.to_string(),
+                        kind_str(p.kind),
+                        name,
+                        p.provider,
+                        p.model
+                    ],
+                )?;
+                p.id
+            };
+            authors.insert(p.id, id);
+        }
+
+        let mut times = Vec::with_capacity(archive.posts.len());
+        for p in &archive.posts {
+            times.push(parse_time(&p.created_at)?);
+        }
+        if existing.is_none() {
+            let title = clean_title(&archive.discussion.title)
+                .unwrap_or_else(|_| "Imported discussion".to_string());
+            let (created, _) = parse_time(&archive.discussion.created_at)?;
+            let archived = archive
+                .discussion
+                .archived_at
+                .as_deref()
+                .map(parse_time)
+                .transpose()?;
+            let latest = times
+                .iter()
+                .map(|t| t.0)
+                .max()
+                .unwrap_or(created)
+                .max(created);
+            tx.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at, archived_at, modified_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    discussion_id.to_string(),
+                    title,
+                    created.0,
+                    latest.0,
+                    archived.map(|(t, _)| t.0),
+                    at.0
+                ],
+            )?;
+        }
+
+        // Parents before replies: in the order written, then any reply whose
+        // parent came later in the file.
+        let mut pending: Vec<usize> = (0..archive.posts.len()).collect();
+        pending.sort_by_key(|&i| times[i].0.0);
+        let mut known: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        let mut added = Vec::new();
+        let mut present = 0;
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut later = Vec::new();
+            for i in pending {
+                let post = &archive.posts[i];
+                if post.parent_id.is_some_and(|p| !known.contains(&p)) {
+                    later.push(i);
+                    continue;
+                }
+                let found: Option<Uuid> = tx
+                    .query_row(
+                        "SELECT discussion_id FROM posts WHERE id = ?1",
+                        [post.id.to_string()],
+                        |row| uuid_at(row, 0),
+                    )
+                    .optional()?;
+                match found {
+                    Some(d) if d == discussion_id => present += 1,
+                    Some(_) => {
+                        return Err(Error::Invalid(format!(
+                            "post {} already belongs to another discussion",
+                            post.id
+                        )));
+                    }
+                    None => {
+                        let (created, offset) = times[i];
+                        let edited = post.edited_at.as_deref().map(parse_time).transpose()?;
+                        let deleted = post.deleted_at.as_deref().map(parse_time).transpose()?;
+                        // An import never resumes a reply that was being written.
+                        let status = match post.status {
+                            PostStatus::Streaming => PostStatus::Failed,
+                            s => s,
+                        };
+                        tx.execute(
+                            "INSERT INTO posts (id, discussion_id, parent_id, author_id, body, created_at,
+                                                tz_offset_minutes, edited_at, deleted_at, status,
+                                                provider_metadata_json, modified_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            params![
+                                post.id.to_string(),
+                                discussion_id.to_string(),
+                                post.parent_id.map(|p| p.to_string()),
+                                authors[&post.author_id].to_string(),
+                                if deleted.is_some() { "" } else { post.body.as_str() },
+                                created.0,
+                                offset,
+                                edited.map(|(t, _)| t.0),
+                                deleted.map(|(t, _)| t.0),
+                                status_str(status),
+                                post.provider_metadata
+                                    .as_ref()
+                                    .map(|m| serde_json::to_string(m).expect("metadata serializes")),
+                                at.0
+                            ],
+                        )?;
+                        if deleted.is_none() {
+                            for r in &post.revisions {
+                                tx.execute(
+                                    "INSERT INTO post_revisions (id, post_id, body, written_at, replaced_at)
+                                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                                    params![
+                                        Uuid::now_v7().to_string(),
+                                        post.id.to_string(),
+                                        r.body,
+                                        parse_time(&r.written_at)?.0 .0,
+                                        parse_time(&r.replaced_at)?.0 .0
+                                    ],
+                                )?;
+                            }
+                        }
+                        added.push(i);
+                    }
+                }
+                known.insert(post.id);
+            }
+            if later.len() == before {
+                return Err(Error::Invalid("the archive's replies form a loop".into()));
+            }
+            pending = later;
+        }
+        for &i in &added {
+            let post = &archive.posts[i];
+            for (position, r) in post.context_ids.iter().enumerate() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO context_refs (post_id, ref_post_id, position)
+                     VALUES (?1, ?2, ?3)",
+                    params![post.id.to_string(), r.to_string(), position as i64],
+                )?;
+            }
+        }
+
+        let result = match (existing, added.is_empty()) {
+            (None, _) => ImportResult::Added,
+            (Some(_), true) => ImportResult::Unchanged,
+            (Some((_, updated)), false) => {
+                let latest = added.iter().map(|&i| times[i].0.0).max().unwrap_or(updated);
+                tx.execute(
+                    "UPDATE discussions SET updated_at = max(updated_at, ?2), modified_at = ?3
+                     WHERE id = ?1",
+                    params![discussion_id.to_string(), latest, at.0],
+                )?;
+                ImportResult::Updated
+            }
+        };
+        tx.commit()?;
+        Ok(outcome(result, added.len(), present))
+    }
+
     fn recover_interrupted(&mut self, at: UnixMillis) -> Result<usize> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -1687,6 +1900,14 @@ fn parse_status(s: &str) -> rusqlite::Result<PostStatus> {
         "cancelled" => PostStatus::Cancelled,
         other => return Err(invalid_text(other)),
     })
+}
+
+fn kind_str(kind: ParticipantKind) -> &'static str {
+    match kind {
+        ParticipantKind::Human => "human",
+        ParticipantKind::Model => "model",
+        ParticipantKind::Agent => "agent",
+    }
 }
 
 fn parse_kind(s: &str) -> rusqlite::Result<ParticipantKind> {

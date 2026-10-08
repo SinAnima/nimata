@@ -145,6 +145,46 @@ fn search_finds_posts_and_remembers_queries() {
 }
 
 #[test]
+fn an_archive_from_one_device_imports_into_another() {
+    use tauri::Manager;
+    let first = app();
+    let started = invoke(
+        &first,
+        "start_discussion",
+        json!({ "title": "CouchDB?", "body": "Should Nimata use CouchDB?" }),
+    )
+    .unwrap();
+    let id = started["discussion"]["id"].as_str().unwrap().to_string();
+    let state = first.state::<AppState>();
+    let markdown = crate::commands::discussion_markdown(&state, id.parse().unwrap()).unwrap();
+    assert!(markdown.starts_with("# CouchDB?\n"));
+    let (bytes, count) = crate::commands::archive_bytes(&state).unwrap();
+    assert_eq!(count, 1);
+
+    let second = app();
+    let state = second.state::<AppState>();
+    let report =
+        serde_json::to_value(crate::commands::import_bytes(&state, &bytes).unwrap()).unwrap();
+    assert_eq!(report["source"], "nimataArchive");
+    assert_eq!(report["outcomes"][0]["result"], "added");
+    assert_eq!(report["outcomes"][0]["postsAdded"], 1);
+    let view = invoke(&second, "get_discussion", json!({ "id": id })).unwrap();
+    let me = invoke(&second, "local_user", json!({})).unwrap();
+    assert_eq!(
+        view["posts"][0]["authorId"], me["id"],
+        "the posts are mine here too"
+    );
+
+    let again =
+        serde_json::to_value(crate::commands::import_bytes(&state, &bytes).unwrap()).unwrap();
+    assert_eq!(again["outcomes"][0]["result"], "unchanged");
+    let error = crate::commands::import_bytes(&state, b"not an export")
+        .err()
+        .unwrap();
+    assert!(error.contains("not a Nimata export"), "{error}");
+}
+
+#[test]
 fn app_info_and_local_user_are_available() {
     let w = app();
     let info = invoke(&w, "app_info", json!({})).unwrap();

@@ -167,8 +167,8 @@ fn context_references_are_exported() {
         .unwrap();
     let view = t.repo.get_discussion(t.discussion).unwrap();
     let revisions = t.repo.discussion_revisions(t.discussion).unwrap();
-    let json =
-        nimata_core::archive::DiscussionArchive::new(&view, &revisions, UnixMillis(0)).to_json();
+    let json = nimata_core::archive::DiscussionArchive::new(&view, &revisions, t.me, UnixMillis(0))
+        .to_json();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["posts"][3]["contextIds"][0], t.right.to_string());
     assert!(value["posts"][0].get("contextIds").is_none());

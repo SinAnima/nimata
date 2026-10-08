@@ -47,6 +47,10 @@ pub struct ArchivedParticipant {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
+    /// True for the person who exported the file. On import, their posts
+    /// become the importing person's own.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub local_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,10 +115,12 @@ pub fn parse_time(text: &str) -> Result<(UnixMillis, i32)> {
 
 impl DiscussionArchive {
     /// Builds the archive for one discussion. `revisions` holds the earlier
-    /// versions of edited posts, keyed by post ID.
+    /// versions of edited posts, keyed by post ID; `local_user` is the
+    /// person exporting.
     pub fn new(
         view: &DiscussionView,
         revisions: &HashMap<Uuid, Vec<Revision>>,
+        local_user: Uuid,
         exported_at: UnixMillis,
     ) -> Self {
         let d = &view.discussion;
@@ -136,6 +142,7 @@ impl DiscussionArchive {
                     display_name: p.display_name.clone(),
                     provider: p.provider.clone(),
                     model: p.model.clone(),
+                    local_user: p.id == local_user,
                 })
                 .collect(),
             posts: view
@@ -312,7 +319,9 @@ mod tests {
     #[test]
     fn every_post_time_round_trips_through_json() {
         let (view, revisions) = sample();
-        let json = DiscussionArchive::new(&view, &revisions, UnixMillis(0)).to_json();
+        let json =
+            DiscussionArchive::new(&view, &revisions, view.participants[0].id, UnixMillis(0))
+                .to_json();
         let back = DiscussionArchive::from_json(&json).unwrap();
         for (original, archived) in view.posts.iter().zip(&back.posts) {
             assert_eq!(
@@ -323,7 +332,7 @@ mod tests {
         }
         assert_eq!(
             back,
-            DiscussionArchive::new(&view, &revisions, UnixMillis(0))
+            DiscussionArchive::new(&view, &revisions, view.participants[0].id, UnixMillis(0))
         );
     }
 
@@ -331,7 +340,8 @@ mod tests {
     fn the_json_is_readable_and_omits_empty_fields() {
         let (view, revisions) = sample();
         let json: serde_json::Value = serde_json::from_str(
-            &DiscussionArchive::new(&view, &revisions, UnixMillis(0)).to_json(),
+            &DiscussionArchive::new(&view, &revisions, view.participants[0].id, UnixMillis(0))
+                .to_json(),
         )
         .unwrap();
         assert_eq!(json["format"], "nimata/1");
@@ -347,16 +357,19 @@ mod tests {
         assert_eq!(json["posts"][2]["body"], "");
         assert!(json["posts"][2]["deletedAt"].is_string());
         assert!(json["participants"][0].get("provider").is_none());
+        assert_eq!(json["participants"][0]["localUser"], true);
     }
 
     #[test]
     fn archives_with_broken_references_are_rejected() {
         let (view, revisions) = sample();
-        let mut archive = DiscussionArchive::new(&view, &revisions, UnixMillis(0));
+        let mut archive =
+            DiscussionArchive::new(&view, &revisions, view.participants[0].id, UnixMillis(0));
         archive.posts[1].parent_id = Some(Uuid::now_v7());
         assert!(DiscussionArchive::from_json(&archive.to_json()).is_err());
 
-        let mut archive = DiscussionArchive::new(&view, &revisions, UnixMillis(0));
+        let mut archive =
+            DiscussionArchive::new(&view, &revisions, view.participants[0].id, UnixMillis(0));
         archive.format = "nimata/99".into();
         let error = DiscussionArchive::from_json(&archive.to_json()).unwrap_err();
         assert!(error.to_string().contains("unsupported archive format"));

@@ -47,6 +47,8 @@ export class FakeBackend {
   drafts = new Map<string, Draft>();
   revisions: Revision[] = [];
   calls: { cmd: string; args: Args }[] = [];
+  /** Conversations the next import_file call brings in, as from ChatGPT. */
+  importable: { title: string; body: string }[] = [];
   recent: string[] = [];
   /** Backups written by backup_database, by path. */
   backups = new Map<string, Snapshot>();
@@ -614,6 +616,36 @@ export class FakeBackend {
       }
       case "database_status":
         return { path: "/data/nimata.sqlite3", error: this.openError };
+      case "export_markdown": {
+        const view = this.view(String(args.id));
+        if (this.dialogPath === null) return null;
+        this.exports.set(this.dialogPath, `# ${view.discussion.title}\n`);
+        return this.dialogPath;
+      }
+      case "export_archive":
+        if (this.dialogPath === null) return null;
+        return {
+          path: this.dialogPath,
+          discussions: this.discussions.length,
+        };
+      case "import_file": {
+        if (this.dialogPath === null) return null;
+        const outcomes = this.importable.map(({ title, body }) => {
+          const { discussion, posts } = this.handle("start_discussion", {
+            title,
+            body,
+          }) as DiscussionView;
+          return {
+            discussionId: discussion.id,
+            title,
+            result: "added",
+            postsAdded: posts.length,
+            postsPresent: 0,
+          };
+        });
+        this.importable = [];
+        return { source: "chatGpt", outcomes, failures: [] };
+      }
       case "export_discussion": {
         const view = this.view(String(args.id));
         if (this.dialogPath === null) return null;
