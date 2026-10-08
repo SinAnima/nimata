@@ -47,6 +47,9 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::record_search,
         commands::recent_searches,
         commands::clear_recent_searches,
+        commands::export_markdown,
+        commands::export_archive,
+        commands::import_file,
     ])
 }
 

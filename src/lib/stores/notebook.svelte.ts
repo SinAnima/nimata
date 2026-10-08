@@ -10,6 +10,7 @@ import type {
   Uuid,
 } from "../types";
 import { Composers } from "./composer.svelte";
+import { describeImport } from "../importReport";
 import { askToConfirm } from "./confirmation.svelte";
 import { nav } from "./nav.svelte";
 
@@ -307,6 +308,45 @@ class Notebook {
     try {
       const path = await api.exportDiscussion(this.view.discussion.id);
       if (path) this.status = `Exported to ${path}`;
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  async exportMarkdown(): Promise<void> {
+    if (!this.view) return;
+    try {
+      const path = await api.exportMarkdown(this.view.discussion.id);
+      if (path) this.status = `Exported to ${path}`;
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  async exportArchive(): Promise<void> {
+    try {
+      const done = await api.exportArchive();
+      if (done) {
+        const n = done.discussions;
+        this.status = `Exported ${n} ${n === 1 ? "discussion" : "discussions"} to ${done.path}`;
+      }
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  /** Imports a file, then shows what changed. */
+  async importFile(): Promise<void> {
+    try {
+      const report = await api.importFile();
+      if (!report) return;
+      this.status = describeImport(report);
+      await this.refreshList();
+      // A discussion that is open may have gained posts.
+      const open = this.view?.discussion.id;
+      if (open && report.outcomes.some((o) => o.discussionId === open)) {
+        await this.open(open);
+      }
     } catch (e) {
       this.report(e);
     }

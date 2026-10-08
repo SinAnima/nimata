@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  ArchiveExport,
+  ImportReport,
   Generation,
   KeyStatus,
   ModelInfo,
@@ -130,6 +132,21 @@ export function exportDiscussion(id: Uuid): Promise<string | null> {
 }
 
 /** Asks where to save; resolves to the saved path, or null if cancelled. */
+/** Asks where to save, then writes the discussion as Markdown. */
+export function exportMarkdown(id: Uuid): Promise<string | null> {
+  return invoke("export_markdown", { id });
+}
+
+/** Asks where to save, then writes every discussion into one archive. */
+export function exportArchive(): Promise<ArchiveExport | null> {
+  return invoke("export_archive");
+}
+
+/** Asks for a Nimata or ChatGPT export, then imports it. */
+export function importFile(): Promise<ImportReport | null> {
+  return invoke("import_file");
+}
+
 export function backupDatabase(): Promise<string | null> {
   return invoke("backup_database");
 }

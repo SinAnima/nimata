@@ -7,6 +7,7 @@ use nimata_core::archive::DiscussionArchive;
 use nimata_core::context::SentContext;
 use nimata_core::domain::PostStatus;
 use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
+use nimata_core::import::{ImportOutcome, ImportSource, read_import};
 use nimata_core::providers::{Capabilities, ModelInfo, capabilities};
 use nimata_core::search::SearchResults;
 use nimata_core::{
@@ -195,7 +196,8 @@ pub fn discussion_json(state: &AppState, id: Uuid) -> CommandResult<String> {
     let mut repo = state.repo()?;
     let view = repo.get_discussion(id).map_err(text)?;
     let revisions = repo.discussion_revisions(id).map_err(text)?;
-    Ok(DiscussionArchive::new(&view, &revisions, UnixMillis::now()).to_json())
+    let me = repo.local_user().map_err(text)?.id;
+    Ok(DiscussionArchive::new(&view, &revisions, me, UnixMillis::now()).to_json())
 }
 
 fn local_path(file: FilePath) -> CommandResult<PathBuf> {
@@ -255,6 +257,132 @@ pub async fn export_discussion<R: Runtime>(
     let path = local_path(file)?;
     std::fs::write(&path, json).map_err(text)?;
     Ok(Some(path.display().to_string()))
+}
+
+/// Asks where to save, then writes the discussion as Markdown for reading
+/// and sharing.
+#[tauri::command]
+pub async fn export_markdown<R: Runtime>(
+    id: Uuid,
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<String>> {
+    let markdown = discussion_markdown(&state, id)?;
+    let title = state
+        .repo()?
+        .get_discussion(id)
+        .map_err(text)?
+        .discussion
+        .title;
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("Export discussion as Markdown")
+        .set_file_name(format!("{}.md", file_name_from(&title)))
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = local_path(file)?;
+    std::fs::write(&path, markdown).map_err(text)?;
+    Ok(Some(path.display().to_string()))
+}
+
+pub fn discussion_markdown(state: &AppState, id: Uuid) -> CommandResult<String> {
+    let archive = DiscussionArchive::from_json(&discussion_json(state, id)?).map_err(text)?;
+    Ok(nimata_core::markdown::discussion_markdown(&archive))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveExport {
+    path: String,
+    discussions: usize,
+}
+
+/// Every discussion as a `nimata-archive/1` zip, in memory.
+pub fn archive_bytes(state: &AppState) -> CommandResult<(Vec<u8>, usize)> {
+    let now = UnixMillis::now();
+    let archives = nimata_core::import::export_all(&mut *state.repo()?, now).map_err(text)?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    nimata_core::import::write_archive(&mut out, &archives, now).map_err(text)?;
+    Ok((out.into_inner(), archives.len()))
+}
+
+/// Asks where to save, then writes every discussion into one archive.
+#[tauri::command]
+pub async fn export_archive<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<ArchiveExport>> {
+    let (bytes, discussions) = archive_bytes(&state)?;
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("Export all discussions")
+        .set_file_name(format!("nimata-archive-{}.zip", today()))
+        .add_filter("Nimata archive", &["zip"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = local_path(file)?;
+    std::fs::write(&path, bytes).map_err(text)?;
+    Ok(Some(ArchiveExport {
+        path: path.display().to_string(),
+        discussions,
+    }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    source: ImportSource,
+    outcomes: Vec<ImportOutcome>,
+    /// Discussions that could not be imported, with the reason.
+    failures: Vec<String>,
+}
+
+/// Imports every discussion in a file's contents; each discussion is all or
+/// nothing, and one failing does not stop the others.
+pub fn import_bytes(state: &AppState, bytes: &[u8]) -> CommandResult<ImportReport> {
+    let (source, archives) = read_import(bytes).map_err(text)?;
+    let mut repo = state.repo()?;
+    let now = UnixMillis::now();
+    let mut report = ImportReport {
+        source,
+        outcomes: Vec::new(),
+        failures: Vec::new(),
+    };
+    for archive in &archives {
+        match repo.import_discussion(archive, now) {
+            Ok(outcome) => report.outcomes.push(outcome),
+            Err(e) => report
+                .failures
+                .push(format!("{}: {e}", archive.discussion.title)),
+        }
+    }
+    Ok(report)
+}
+
+/// Asks for a Nimata export or a ChatGPT export, then imports it.
+#[tauri::command]
+pub async fn import_file<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<ImportReport>> {
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("Import discussions")
+        .add_filter("Nimata or ChatGPT export", &["zip", "json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(local_path(file)?).map_err(text)?;
+    import_bytes(&state, &bytes).map(Some)
 }
 
 /// Asks where to save, then writes a complete backup of the database.

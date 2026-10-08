@@ -115,6 +115,13 @@
         <button
           type="button"
           class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
+          onclick={() => menuAction(() => notebook.exportMarkdown())}
+        >
+          Export as Markdown…
+        </button>
+        <button
+          type="button"
+          class="block min-h-10 w-full px-4 text-left text-sm hover:bg-accent-soft"
           onclick={() => menuAction(() => notebook.setArchived(!archived))}
         >
           {archived ? "Unarchive" : "Archive"}

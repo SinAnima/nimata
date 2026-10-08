@@ -242,6 +242,17 @@ pub trait Repository {
     fn recent_searches(&mut self, limit: usize) -> Result<Vec<String>>;
 
     fn clear_recent_searches(&mut self) -> Result<()>;
+
+    /// Adds a discussion from an archive. Records are matched by ID, so
+    /// importing the same file again changes nothing, and an older export
+    /// adds only posts this device does not have. Posts already here are
+    /// left as they are. A discussion deleted here stays deleted. Posts by
+    /// the archive's `local_user` become the local user's.
+    fn import_discussion(
+        &mut self,
+        archive: &crate::archive::DiscussionArchive,
+        at: UnixMillis,
+    ) -> Result<crate::import::ImportOutcome>;
 }
 
 /// How a model reply ended.
