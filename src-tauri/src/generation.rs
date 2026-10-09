@@ -7,7 +7,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use nimata_core::context::{self, SentContext};
+use nimata_core::attachments::{Attachment, AttachmentKind, BlobStore};
+use nimata_core::context::{self, Files, SentContext};
 use nimata_core::domain::{
     GenerationStatus, ModelParticipant, Post, ProviderConfig, ProviderKind, ProviderMetadata,
 };
@@ -16,7 +17,7 @@ use nimata_core::providers::openai::{self, OpenAi};
 use nimata_core::providers::openai_compatible::OpenAiCompatible;
 use nimata_core::providers::{
     Completion, HttpClient, ModelProvider, ModelRequest, ProviderError, StreamEvent,
-    context_budget, http_client,
+    context_budget, file_support, http_client,
 };
 use nimata_core::repository::GenerationOutcome;
 use nimata_core::{Repository, Timestamp, UnixMillis};
@@ -117,16 +118,33 @@ fn text<E: ToString>(e: E) -> String {
 /// What `model` would be sent to reply to `target`. `unsent` is a post not
 /// yet saved (the composer's draft), included so the preview matches what
 /// posting will send.
+/// What `model` is sent when asked to reply to `target`. `unsent` is a
+/// post being written, with its files, for previews.
 pub fn context_for(
     repo: &mut impl Repository,
+    store: &BlobStore,
     discussion_id: Uuid,
     target: Uuid,
     model: &ModelParticipant,
-    unsent: Option<Post>,
+    unsent: Option<(Post, Vec<Attachment>)>,
 ) -> Result<SentContext, String> {
     let view = repo.get_discussion(discussion_id).map_err(text)?;
     let mut posts = view.posts;
-    posts.extend(unsent);
+    let mut attachments = view.attachments;
+    if let Some((post, files)) = unsent {
+        posts.push(post);
+        attachments.extend(files);
+    }
+    // Text files are sent inline; read them now. One that cannot be read
+    // is reported to the model as not available.
+    let texts: HashMap<String, String> = attachments
+        .iter()
+        .filter(|a| a.kind == AttachmentKind::Text)
+        .filter_map(|a| {
+            let bytes = store.read(&a.content_hash).ok()?;
+            Some((a.content_hash.clone(), String::from_utf8(bytes).ok()?))
+        })
+        .collect();
     let mut participants = view.participants;
     participants.push(model.participant.clone());
     participants.push(repo.local_user().map_err(text)?);
@@ -138,6 +156,11 @@ pub fn context_for(
         &model.participant,
         model.participant.model.as_deref().unwrap_or_default(),
         context_budget(config.kind),
+        Files {
+            attachments: &attachments,
+            texts: Some(&texts),
+            support: file_support(config.kind),
+        },
     )
     .map_err(text)
 }
@@ -173,8 +196,11 @@ pub fn ask<R: Runtime>(
         let provider = generations.provider_for(&config, key)?;
         let provider_name = config.kind.as_str().to_string();
 
-        let sent = context_for(&mut *repo, discussion_id, parent_id, &model, None)?;
-        let request = sent.request();
+        let store = state.blobs()?;
+        let sent = context_for(&mut *repo, store, discussion_id, parent_id, &model, None)?;
+        let request = sent
+            .request(|hash| store.read(hash))
+            .map_err(|e| format!("an attached file could not be read: {e}"))?;
         let (post, generation) = repo
             .begin_generation(
                 discussion_id,

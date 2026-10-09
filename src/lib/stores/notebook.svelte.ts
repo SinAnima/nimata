@@ -7,10 +7,12 @@ import type {
   Participant,
   Post,
   ProviderView,
+  StagedAttachment,
   Uuid,
 } from "../types";
 import { Composers } from "./composer.svelte";
 import { describeImport } from "../importReport";
+import { MAX_ATTACHMENT_BYTES } from "../attach";
 import { askToConfirm } from "./confirmation.svelte";
 import { nav } from "./nav.svelte";
 
@@ -171,9 +173,10 @@ class Notebook {
     title: string,
     body: string,
     ask: ModelParticipant[] = [],
+    attachments: StagedAttachment[] = [],
   ): Promise<boolean> {
     try {
-      const view = await api.startDiscussion(title, body);
+      const view = await api.startDiscussion(title, body, attachments);
       this.view = view;
       nav.open(view.discussion.id);
       this.filter = "active";
@@ -200,12 +203,19 @@ class Notebook {
     const view = this.view;
     if (!view || !this.me) return null;
     const id = view.discussion.id;
-    const { draft, context } = this.composers.get(id);
+    const { draft, context, attachments } = this.composers.get(id);
     try {
-      const post = await api.addPost(id, parentId, draft, context);
+      const post = await api.addPost(id, parentId, draft, context, attachments);
       this.composers.clear(id);
       if (this.view?.discussion.id === id) {
         this.view.posts.push(post);
+        if (attachments.length > 0) {
+          // The attachments now have IDs; fetch them as recorded.
+          const fresh = await api.getDiscussion(id);
+          if (this.view?.discussion.id === id) {
+            this.view.attachments = fresh.attachments;
+          }
+        }
         if (!this.view.participants.some((p) => p.id === post.authorId)) {
           this.view.participants.push(this.me);
         }
@@ -308,6 +318,53 @@ class Notebook {
     try {
       const path = await api.exportDiscussion(this.view.discussion.id);
       if (path) this.status = `Exported to ${path}`;
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  /**
+   * Stores files the person added, one at a time, handing each to `add` as
+   * soon as it is stored. `onProgress` gets the number still to store.
+   */
+  async stageFiles(
+    files: File[],
+    add: (file: StagedAttachment) => void,
+    onProgress: (remaining: number) => void = () => {},
+  ): Promise<void> {
+    let remaining = files.length;
+    onProgress(remaining);
+    for (const file of files) {
+      try {
+        if (file.size > MAX_ATTACHMENT_BYTES) {
+          throw `${file.name} is larger than ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB, the most a post can carry`;
+        }
+        add(await api.stageAttachment(file));
+      } catch (e) {
+        this.report(e);
+      }
+      onProgress(--remaining);
+    }
+  }
+
+  /** Takes a file out of the post being written, deleting it if unused. */
+  async removeStaged(discussionId: Uuid, index: number): Promise<void> {
+    const removed = await this.composers.removeAttachment(discussionId, index);
+    if (removed) await this.discardStaged(removed);
+  }
+
+  async discardStaged(file: StagedAttachment): Promise<void> {
+    try {
+      await api.discardStaged(file.contentHash);
+    } catch (e) {
+      this.report(e);
+    }
+  }
+
+  async saveAttachment(id: Uuid): Promise<void> {
+    try {
+      const path = await api.saveAttachment(id);
+      if (path) this.status = `Saved to ${path}`;
     } catch (e) {
       this.report(e);
     }

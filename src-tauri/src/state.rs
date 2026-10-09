@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use nimata_core::archive::format_utc;
+use nimata_core::attachments::BlobStore;
 use nimata_core::{Repository, SqliteRepository, UnixMillis};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
@@ -16,7 +17,12 @@ pub struct AppState {
     inner: Mutex<Inner>,
     /// The data folder, when it could be determined.
     pub data_dir: Option<PathBuf>,
+    /// Where attached files are kept: `blobs` in the data folder.
+    blobs: Option<BlobStore>,
 }
+
+/// Folder inside the data folder for attached files.
+pub const BLOBS: &str = "blobs";
 
 struct Inner {
     /// The open database. `None` when it could not be opened; `error` then
@@ -87,6 +93,7 @@ impl AppState {
                         error: None,
                     }),
                     data_dir: Some(dir.to_path_buf()),
+                    blobs: Some(BlobStore::new(dir.join(BLOBS))),
                 }
             }
             Err(e) => Self::failed(
@@ -96,14 +103,19 @@ impl AppState {
         }
     }
 
+    /// An in-memory database, with attached files in a fresh temporary
+    /// folder.
     #[cfg(test)]
     pub fn with_repo(repo: SqliteRepository) -> Self {
+        let blobs =
+            std::env::temp_dir().join(format!("nimata-test-blobs-{}", uuid::Uuid::now_v7()));
         Self {
             inner: Mutex::new(Inner {
                 repo: Some(repo),
                 error: None,
             }),
             data_dir: None,
+            blobs: Some(BlobStore::new(blobs)),
         }
     }
 
@@ -113,8 +125,27 @@ impl AppState {
                 repo: None,
                 error: Some(message),
             }),
+            blobs: data_dir.as_ref().map(|d| BlobStore::new(d.join(BLOBS))),
             data_dir,
         }
+    }
+
+    pub fn blobs(&self) -> Result<&BlobStore, String> {
+        self.blobs
+            .as_ref()
+            .ok_or_else(|| "the data folder is unknown, so files cannot be stored".to_string())
+    }
+
+    /// Removes the stored bytes of `hashes` that nothing refers to any more.
+    pub fn release(&self, hashes: impl IntoIterator<Item = String>) -> Result<(), String> {
+        let store = self.blobs()?;
+        let mut repo = self.repo()?;
+        for hash in hashes {
+            if !repo.hash_in_use(&hash).map_err(|e| e.to_string())? {
+                store.remove(&hash).map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Inner>, String> {
@@ -151,7 +182,9 @@ impl AppState {
 
     /// Writes a backup of the open database to `dest`.
     pub fn backup_to(&self, dest: &Path) -> Result<(), String> {
-        self.repo()?.backup_to(dest).map_err(|e| e.to_string())
+        self.repo()?
+            .backup_with_files(dest, self.blobs.as_ref())
+            .map_err(|e| e.to_string())
     }
 
     /// Replaces the database with the backup at `src`.
@@ -174,7 +207,9 @@ impl AppState {
             std::fs::create_dir_all(&copies).map_err(|e| e.to_string())?;
             let safety = copies.join(format!("before-restore-{}.sqlite3", timestamp_for_files()));
             repo.backup_to(&safety).map_err(text)?;
-            return repo.restore_from(src).map_err(text);
+            return repo
+                .restore_with_files(src, self.blobs.as_ref())
+                .map_err(text);
         }
 
         // Restore into a separate file first, so a bad backup changes nothing.
@@ -183,7 +218,7 @@ impl AppState {
         let _ = std::fs::remove_file(&restoring);
         {
             let mut fresh = SqliteRepository::open(&restoring).map_err(text)?;
-            if let Err(e) = fresh.restore_from(src) {
+            if let Err(e) = fresh.restore_with_files(src, self.blobs.as_ref()) {
                 drop(fresh);
                 let _ = std::fs::remove_file(&restoring);
                 return Err(e.to_string());

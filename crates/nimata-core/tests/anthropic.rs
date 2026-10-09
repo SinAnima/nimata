@@ -18,6 +18,7 @@ fn request() -> ModelRequest {
         messages: vec![Message {
             role: Role::User,
             text: "Thanos:\nCan sync stay an adapter?".into(),
+            files: vec![],
         }],
     }
 }

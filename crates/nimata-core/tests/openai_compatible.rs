@@ -19,6 +19,7 @@ fn request() -> ModelRequest {
         messages: vec![Message {
             role: Role::User,
             text: "Thanos:\nCan local models join?".into(),
+            files: vec![],
         }],
     }
 }

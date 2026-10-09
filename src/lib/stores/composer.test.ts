@@ -25,6 +25,7 @@ describe("Composers", () => {
       "p1",
       "Half a thought",
       [],
+      [],
     );
   });
 
@@ -48,6 +49,7 @@ describe("Composers", () => {
       replyTo: "p1",
       draft: "stored",
       context: [],
+      attachments: [],
     });
 
     composers.setDraft("d1", "newer");
@@ -58,7 +60,7 @@ describe("Composers", () => {
   it("flush saves pending changes immediately", () => {
     composers.setDraft("d1", "unsaved");
     composers.flush();
-    expect(save).toHaveBeenCalledExactlyOnceWith("d1", null, "unsaved", []);
+    expect(save).toHaveBeenCalledExactlyOnceWith("d1", null, "unsaved", [], []);
     vi.advanceTimersByTime(SAVE_DELAY_MS);
     expect(save).toHaveBeenCalledOnce();
   });
@@ -72,6 +74,29 @@ describe("Composers", () => {
       replyTo: null,
       draft: "",
       context: [],
+      attachments: [],
     });
+  });
+
+  it("keeps files with the draft and saves at once when one is removed", async () => {
+    const file = (name: string) => ({
+      filename: name,
+      mediaType: "text/markdown",
+      size: 3,
+      contentHash: `sha256:${name}`,
+      kind: "text" as const,
+    });
+    composers.addAttachment("d1", file("a.md"));
+    composers.addAttachment("d1", file("b.md"));
+    const removed = await composers.removeAttachment("d1", 0);
+    expect(removed?.filename).toBe("a.md");
+    // Saved without waiting for the typing pause, so the file can be deleted.
+    expect(save).toHaveBeenCalledExactlyOnceWith(
+      "d1",
+      null,
+      "",
+      [],
+      [file("b.md")],
+    );
   });
 });

@@ -29,7 +29,7 @@ leave the search index out of date.
 Migration tests load frozen databases from earlier versions
 (`crates/nimata-core/tests/fixtures/`) and check that nothing is lost.
 
-## Tables (schema version 6)
+## Tables (schema version 7)
 
 ### participants
 
@@ -118,8 +118,9 @@ post when the post is deleted.
 
 ### attachments
 
-Metadata for files attached to posts. The table exists from schema version
-2; storing and showing files arrives in Stage 8.
+Metadata for files attached to posts; the bytes are in the blob store. The
+table exists from schema version 2 and is used from version 7 (see
+[below](#attachments-schema-version-7)).
 
 | column       | meaning                                      |
 | ------------ | -------------------------------------------- |
@@ -129,9 +130,11 @@ Metadata for files attached to posts. The table exists from schema version
 | media_type   | e.g. `text/markdown`                         |
 | size         | bytes                                        |
 | content_hash | `sha256:<hex>`; identical files share a hash |
-| local_uri    | where the file is stored on this device      |
+| kind         | `text`, `image`, `pdf`, or `other` (v7)      |
+| position     | order among the post's files (v7)            |
 | created_at   | when it was attached                         |
-| deleted_at   | tombstone                                    |
+| local_uri    | unused                                       |
+| deleted_at   | unused: deleting a post deletes its rows     |
 
 ## Deletion
 
@@ -257,3 +260,21 @@ Only searches whose results were opened are remembered, the ten most
 recent. They stay on this device and are not part of discussion exports.
 
 See [search.md](search.md) for the query syntax.
+
+## Attachments (schema version 7)
+
+Attached files' bytes live in the blob store, `blobs/sha256/ab/<hash>` in
+the data folder, named by content hash; see [attachments.md](attachments.md).
+Version 7 starts using the `attachments` table:
+
+- `kind` records what Nimata can do with the file, decided from its
+  contents when it was attached; `position` keeps the order.
+- Attachment rows never change once posted (a trigger enforces this).
+  Deleting a post deletes its rows, and the bytes are deleted once no
+  attachment or draft refers to their hash.
+- `drafts.attachments` (JSON array) holds files added to an unsent post:
+  `filename`, `mediaType`, `size`, `contentHash`, `kind`.
+
+A backup written by Nimata 7 or later has one more table,
+`backup_files (content_hash, bytes)`, holding a copy of every attached file.
+Restoring puts those files back in the blob store and removes the table.

@@ -90,6 +90,10 @@ export interface Capabilities {
   modelDiscovery: boolean;
   streaming: boolean;
   usage: boolean;
+  /** Images can be sent to its models. */
+  images: boolean;
+  /** PDF documents can be sent to its models. */
+  pdfs: boolean;
 }
 
 export interface ProviderView {
@@ -127,6 +131,24 @@ export interface SentMessage {
   text: string;
   source: ContextSource;
   postIds: Uuid[];
+  /** Files sent with the message; text files are inside `text`. */
+  attachments?: SentAttachment[];
+}
+
+export interface SentAttachment {
+  id: Uuid;
+  filename: string;
+  mediaType: string;
+  size: number;
+  contentHash: string;
+  delivery: "text" | "image" | "pdf";
+}
+
+export interface OmittedAttachment {
+  id: Uuid;
+  postId: Uuid;
+  filename: string;
+  reason: "unsupported" | "too_large" | "missing";
 }
 
 export interface Omitted {
@@ -143,6 +165,8 @@ export interface SentContext {
   omitted: Omitted[];
   estimatedTokens: number;
   budgetTokens: number;
+  /** Files on sent posts that this model could not take. */
+  omittedAttachments?: OmittedAttachment[];
 }
 
 /** An earlier version of an edited post. */
@@ -176,6 +200,8 @@ export interface Draft {
   updatedAt: UnixMillis;
   /** Posts chosen as context for the unsent post. */
   contextIds: Uuid[];
+  /** Files added to the unsent post. */
+  attachments?: StagedAttachment[];
 }
 
 export interface DiscussionView {
@@ -183,6 +209,8 @@ export interface DiscussionView {
   posts: Post[];
   participants: Participant[];
   draft: Draft | null;
+  /** Files attached to the posts, in the order attached. */
+  attachments: Attachment[];
 }
 
 export type DiscussionFilter = "active" | "archived";
@@ -233,6 +261,9 @@ export interface ImportOutcome {
   result: "added" | "updated" | "unchanged" | "skippedDeleted";
   postsAdded: number;
   postsPresent: number;
+  attachmentsAdded: number;
+  /** Files listed on imported posts but not in the file imported. */
+  attachmentsMissing: number;
 }
 
 export interface ImportReport {
@@ -245,4 +276,29 @@ export interface ImportReport {
 export interface ArchiveExport {
   path: string;
   discussions: number;
+}
+
+export type AttachmentKind = "text" | "image" | "pdf" | "other";
+
+/** A file stored and waiting to be posted. */
+export interface StagedAttachment {
+  filename: string;
+  mediaType: string;
+  size: number;
+  /** `sha256:<hex>` of the bytes. */
+  contentHash: string;
+  kind: AttachmentKind;
+}
+
+/** A file attached to a post. */
+export interface Attachment extends StagedAttachment {
+  id: Uuid;
+  postId: Uuid;
+  createdAt: UnixMillis;
+}
+
+export interface AttachmentText {
+  text: string;
+  /** Only the beginning is included. */
+  truncated: boolean;
 }

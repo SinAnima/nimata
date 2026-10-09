@@ -11,6 +11,7 @@ use chrono::{DateTime, FixedOffset, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::attachments::{AttachmentKind, hash_hex};
 use crate::domain::{DiscussionView, ParticipantKind, PostStatus, ProviderMetadata, Revision};
 use crate::error::{Error, Result};
 use crate::time::UnixMillis;
@@ -78,6 +79,23 @@ pub struct ArchivedPost {
     /// Other posts the author chose as context, besides the one replied to.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub context_ids: Vec<Uuid>,
+    /// Files attached to the post. Their bytes travel in archives, under
+    /// `attachments/<hex of the hash>`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub attachments: Vec<ArchivedAttachment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedAttachment {
+    pub id: Uuid,
+    pub filename: String,
+    pub media_type: String,
+    pub size: u64,
+    /// `sha256:<hex>` of the bytes.
+    pub content_hash: String,
+    pub kind: AttachmentKind,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,9 +187,35 @@ impl DiscussionArchive {
                         .collect(),
                     provider_metadata: p.provider_metadata.clone(),
                     context_ids: p.context_ids.clone(),
+                    attachments: view
+                        .attachments
+                        .iter()
+                        .filter(|a| a.post_id == p.id)
+                        .map(|a| ArchivedAttachment {
+                            id: a.id,
+                            filename: a.filename.clone(),
+                            media_type: a.media_type.clone(),
+                            size: a.size,
+                            content_hash: a.content_hash.clone(),
+                            kind: a.kind,
+                            created_at: format_utc(a.created_at),
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
+    }
+
+    /// Every content hash of the files attached to its posts.
+    pub fn attachment_hashes(&self) -> Vec<&str> {
+        let mut hashes: Vec<&str> = self
+            .posts
+            .iter()
+            .flat_map(|p| p.attachments.iter().map(|a| a.content_hash.as_str()))
+            .collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+        hashes
     }
 
     pub fn to_json(&self) -> String {
@@ -213,6 +257,14 @@ impl DiscussionArchive {
                 )));
             }
             parse_time(&post.created_at)?;
+            for a in &post.attachments {
+                if hash_hex(&a.content_hash).is_none() {
+                    return Err(Error::Invalid(format!(
+                        "attachment {} has an invalid content hash",
+                        a.id
+                    )));
+                }
+            }
         }
         Ok(archive)
     }
@@ -296,6 +348,7 @@ mod tests {
             posts: vec![root, edited, deleted],
             participants: vec![me],
             draft: None,
+            attachments: vec![],
         };
         (view, revisions)
     }

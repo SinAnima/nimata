@@ -9,7 +9,10 @@ use uuid::Uuid;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use std::collections::HashMap;
+
 use crate::archive::{DiscussionArchive, FORMAT, format_utc};
+use crate::attachments::{content_hash, hash_hex};
 use crate::chatgpt;
 use crate::error::{Error, Result};
 use crate::time::UnixMillis;
@@ -64,10 +67,15 @@ pub fn export_all<R: crate::Repository + ?Sized>(
 
 /// Writes every discussion into a zip: `manifest.json` and
 /// `discussions/<id>.json`.
+///
+/// `read` returns a file's bytes by content hash; they are written under
+/// `attachments/<hex>`. A file this device does not have is left out, and
+/// the post still lists it.
 pub fn write_archive<W: Write + Seek>(
     out: W,
     discussions: &[DiscussionArchive],
     exported_at: UnixMillis,
+    read: impl Fn(&str) -> Result<Vec<u8>>,
 ) -> Result<()> {
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let mut zip = ZipWriter::new(out);
@@ -83,11 +91,31 @@ pub fn write_archive<W: Write + Seek>(
             posts: archive.posts.len(),
         });
     }
+    let mut hashes: Vec<&str> = discussions
+        .iter()
+        .flat_map(|d| d.attachment_hashes())
+        .collect();
+    hashes.sort_unstable();
+    hashes.dedup();
+    let mut attachments = Vec::new();
+    for hash in hashes {
+        let bytes = match read(hash) {
+            Ok(bytes) => bytes,
+            Err(Error::NotFound(_)) => continue,
+            Err(e) => return Err(e),
+        };
+        let hex = hash_hex(hash).expect("archives hold valid hashes");
+        // Images and PDFs are compressed already.
+        zip.start_file(format!("attachments/{hex}"), options)
+            .map_err(zip_error)?;
+        zip.write_all(&bytes)?;
+        attachments.push(hash.to_string());
+    }
     let manifest = Manifest {
         format: ARCHIVE_FORMAT.into(),
         exported_at: format_utc(exported_at),
         discussions: entries,
-        attachments: vec![],
+        attachments,
     };
     zip.start_file("manifest.json", options)
         .map_err(zip_error)?;
@@ -102,6 +130,22 @@ pub fn write_archive<W: Write + Seek>(
 
 fn zip_error(e: zip::result::ZipError) -> Error {
     Error::Invalid(format!("the zip file could not be read or written: {e}"))
+}
+
+fn read_bytes<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Option<Vec<u8>>> {
+    let file = match zip.by_name(name) {
+        Ok(file) => file,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(e) => return Err(zip_error(e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_ENTRY_BYTES {
+        return Err(Error::Invalid(format!(
+            "{name} in the zip is too large to import"
+        )));
+    }
+    Ok(Some(bytes))
 }
 
 fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Option<String>> {
@@ -122,10 +166,7 @@ fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Opt
     Ok(Some(text))
 }
 
-fn read_archive<R: Read + Seek>(
-    zip: &mut ZipArchive<R>,
-    manifest: &str,
-) -> Result<Vec<DiscussionArchive>> {
+fn read_archive<R: Read + Seek>(zip: &mut ZipArchive<R>, manifest: &str) -> Result<ImportFile> {
     let manifest: Manifest = serde_json::from_str(manifest)
         .map_err(|e| Error::Invalid(format!("the archive's manifest.json is not valid: {e}")))?;
     if manifest.format != ARCHIVE_FORMAT {
@@ -134,7 +175,7 @@ fn read_archive<R: Read + Seek>(
             manifest.format
         )));
     }
-    manifest
+    let discussions = manifest
         .discussions
         .iter()
         .map(|entry| {
@@ -154,7 +195,44 @@ fn read_archive<R: Read + Seek>(
             }
             Ok(archive)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    let mut files = HashMap::new();
+    for hash in &manifest.attachments {
+        let hex = hash_hex(hash)
+            .ok_or_else(|| Error::Invalid(format!("the manifest lists an invalid hash {hash}")))?;
+        let name = format!("attachments/{hex}");
+        let bytes = read_bytes(zip, &name)?.ok_or_else(|| {
+            Error::Invalid(format!("the archive lists {name} but does not contain it"))
+        })?;
+        if content_hash(&bytes) != *hash {
+            return Err(Error::Invalid(format!("{name} in the archive is damaged")));
+        }
+        files.insert(hash.clone(), bytes);
+    }
+    Ok(ImportFile {
+        source: ImportSource::NimataArchive,
+        discussions,
+        files,
+    })
+}
+
+/// The contents of a file chosen for import.
+#[derive(Debug)]
+pub struct ImportFile {
+    pub source: ImportSource,
+    pub discussions: Vec<DiscussionArchive>,
+    /// Attached files' bytes by content hash, each checked against it.
+    pub files: HashMap<String, Vec<u8>>,
+}
+
+impl ImportFile {
+    fn without_files(source: ImportSource, discussions: Vec<DiscussionArchive>) -> Self {
+        Self {
+            source,
+            discussions,
+            files: HashMap::new(),
+        }
+    }
 }
 
 /// What kind of file was imported.
@@ -170,17 +248,17 @@ pub enum ImportSource {
 }
 
 /// Reads a file chosen for import, recognising it by its contents.
-pub fn read_import(bytes: &[u8]) -> Result<(ImportSource, Vec<DiscussionArchive>)> {
+pub fn read_import(bytes: &[u8]) -> Result<ImportFile> {
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
         let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).map_err(zip_error)?;
         if let Some(manifest) = read_entry(&mut zip, "manifest.json")? {
-            return Ok((
-                ImportSource::NimataArchive,
-                read_archive(&mut zip, &manifest)?,
-            ));
+            return read_archive(&mut zip, &manifest);
         }
         if let Some(json) = read_entry(&mut zip, "conversations.json")? {
-            return Ok((ImportSource::ChatGpt, chatgpt::conversations(&json)?));
+            return Ok(ImportFile::without_files(
+                ImportSource::ChatGpt,
+                chatgpt::conversations(&json)?,
+            ));
         }
         return Err(Error::Invalid(
             "this zip is neither a Nimata archive nor a ChatGPT export \
@@ -196,11 +274,14 @@ pub fn read_import(bytes: &[u8]) -> Result<(ImportSource, Vec<DiscussionArchive>
             Error::Invalid("this file is not a Nimata export or a ChatGPT export".into())
         })?;
     match &value {
-        serde_json::Value::Array(_) => Ok((ImportSource::ChatGpt, chatgpt::conversations(text)?)),
+        serde_json::Value::Array(_) => Ok(ImportFile::without_files(
+            ImportSource::ChatGpt,
+            chatgpt::conversations(text)?,
+        )),
         serde_json::Value::Object(map)
             if map.get("format").and_then(|f| f.as_str()) == Some(FORMAT) =>
         {
-            Ok((
+            Ok(ImportFile::without_files(
                 ImportSource::NimataDiscussion,
                 vec![DiscussionArchive::from_json(text)?],
             ))
@@ -240,6 +321,10 @@ pub struct ImportOutcome {
     pub posts_added: usize,
     /// Posts that were already here, by ID, and left unchanged.
     pub posts_present: usize,
+    pub attachments_added: usize,
+    /// Files listed on imported posts whose bytes were not in the file
+    /// imported, nor already on this device.
+    pub attachments_missing: usize,
 }
 
 #[cfg(test)]
@@ -279,6 +364,7 @@ mod tests {
                 revisions: vec![],
                 provider_metadata: None,
                 context_ids: vec![],
+                attachments: vec![],
             }],
         }
     }
@@ -298,10 +384,17 @@ mod tests {
     fn an_archive_round_trips_with_a_readable_manifest() {
         let discussions = vec![discussion("One"), discussion("Two")];
         let mut out = std::io::Cursor::new(Vec::new());
-        write_archive(&mut out, &discussions, UnixMillis(0)).unwrap();
+        write_archive(&mut out, &discussions, UnixMillis(0), |_| {
+            Err(Error::NotFound("file"))
+        })
+        .unwrap();
         let bytes = out.into_inner();
 
-        let (source, back) = read_import(&bytes).unwrap();
+        let ImportFile {
+            source,
+            discussions: back,
+            ..
+        } = read_import(&bytes).unwrap();
         assert_eq!(source, ImportSource::NimataArchive);
         assert_eq!(back, discussions);
 
@@ -319,7 +412,11 @@ mod tests {
     #[test]
     fn single_discussions_and_unknown_files_are_recognised() {
         let one = discussion("One");
-        let (source, back) = read_import(one.to_json().as_bytes()).unwrap();
+        let ImportFile {
+            source,
+            discussions: back,
+            ..
+        } = read_import(one.to_json().as_bytes()).unwrap();
         assert_eq!(source, ImportSource::NimataDiscussion);
         assert_eq!(back, vec![one]);
 

@@ -1,9 +1,11 @@
 // The only module that talks to the Rust core.
 
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppInfo,
+  AttachmentText,
+  StagedAttachment,
   ArchiveExport,
   ImportReport,
   Generation,
@@ -55,8 +57,9 @@ export function getDiscussion(id: Uuid): Promise<DiscussionView> {
 export function startDiscussion(
   title: string,
   body: string,
+  attachments: StagedAttachment[] = [],
 ): Promise<DiscussionView> {
-  return invoke("start_discussion", { title, body });
+  return invoke("start_discussion", { title, body, attachments });
 }
 
 export function addPost(
@@ -64,8 +67,50 @@ export function addPost(
   parentId: Uuid | null,
   body: string,
   contextIds: Uuid[] = [],
+  attachments: StagedAttachment[] = [],
 ): Promise<Post> {
-  return invoke("add_post", { discussionId, parentId, body, contextIds });
+  return invoke("add_post", {
+    discussionId,
+    parentId,
+    body,
+    contextIds,
+    attachments,
+  });
+}
+
+/**
+ * Stores a file for a post being written. The bytes go to Rust as the raw
+ * request body, after the file's name and type (length-prefixed JSON).
+ */
+export async function stageAttachment(file: File): Promise<StagedAttachment> {
+  const meta = new TextEncoder().encode(
+    JSON.stringify({ filename: file.name, mediaType: file.type }),
+  );
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const body = new Uint8Array(4 + meta.length + bytes.length);
+  new DataView(body.buffer).setUint32(0, meta.length, true);
+  body.set(meta, 4);
+  body.set(bytes, 4 + meta.length);
+  return invoke("stage_attachment", body);
+}
+
+/** Forgets a file removed before posting, unless something else uses it. */
+export function discardStaged(contentHash: string): Promise<void> {
+  return invoke("discard_staged", { contentHash });
+}
+
+export function attachmentText(contentHash: string): Promise<AttachmentText> {
+  return invoke("attachment_text", { contentHash });
+}
+
+/** Asks where to save, then writes a copy of an attached file there. */
+export function saveAttachment(id: Uuid): Promise<string | null> {
+  return invoke("save_attachment", { id });
+}
+
+/** The address an attached image is shown from. */
+export function attachmentUrl(contentHash: string): string {
+  return convertFileSrc(contentHash.replace(/^sha256:/, ""), "attachment");
 }
 
 export function renameDiscussion(id: Uuid, title: string): Promise<Discussion> {
@@ -81,8 +126,15 @@ export function saveDraft(
   parentId: Uuid | null,
   body: string,
   contextIds: Uuid[] = [],
+  attachments: StagedAttachment[] = [],
 ): Promise<void> {
-  return invoke("save_draft", { discussionId, parentId, body, contextIds });
+  return invoke("save_draft", {
+    discussionId,
+    parentId,
+    body,
+    contextIds,
+    attachments,
+  });
 }
 
 /**
@@ -96,6 +148,7 @@ export function previewContext(
   participantId: Uuid,
   draft: string | null,
   contextIds: Uuid[] = [],
+  attachments: StagedAttachment[] = [],
 ): Promise<SentContext> {
   return invoke("preview_context", {
     discussionId,
@@ -103,6 +156,7 @@ export function previewContext(
     participantId,
     draft,
     contextIds,
+    attachments,
   });
 }
 

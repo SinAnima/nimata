@@ -4,6 +4,9 @@
 use std::path::PathBuf;
 
 use nimata_core::archive::DiscussionArchive;
+use nimata_core::attachments::{
+    Attachment, MAX_ATTACHMENT_BYTES, StagedAttachment, classify, clean_filename,
+};
 use nimata_core::context::SentContext;
 use nimata_core::domain::PostStatus;
 use nimata_core::domain::{Generation, ModelParticipant, ProviderConfig, ProviderKind};
@@ -78,12 +81,14 @@ pub fn get_discussion(id: Uuid, state: State<'_, AppState>) -> CommandResult<Dis
 pub fn start_discussion(
     title: String,
     body: String,
+    attachments: Option<Vec<StagedAttachment>>,
     state: State<'_, AppState>,
 ) -> CommandResult<DiscussionView> {
+    let attachments = stored(&state, attachments)?;
     let mut repo = state.repo()?;
     let me = repo.local_user().map_err(text)?;
     let (discussion, _) = repo
-        .start_discussion(&title, me.id, &body, Timestamp::now())
+        .start_discussion_with_attachments(&title, me.id, &body, &attachments, Timestamp::now())
         .map_err(text)?;
     repo.get_discussion(discussion.id).map_err(text)
 }
@@ -95,19 +100,44 @@ pub fn add_post(
     parent_id: Option<Uuid>,
     body: String,
     context_ids: Option<Vec<Uuid>>,
+    attachments: Option<Vec<StagedAttachment>>,
     state: State<'_, AppState>,
 ) -> CommandResult<Post> {
+    let attachments = stored(&state, attachments)?;
     let mut repo = state.repo()?;
     let me = repo.local_user().map_err(text)?;
-    repo.add_post_with_context(
+    repo.add_post_with_attachments(
         discussion_id,
         parent_id,
         me.id,
         &body,
         &context_ids.unwrap_or_default(),
+        &attachments,
         Timestamp::now(),
     )
     .map_err(text)
+}
+
+/// Checks that every file about to be posted is in the blob store.
+fn stored(
+    state: &AppState,
+    attachments: Option<Vec<StagedAttachment>>,
+) -> CommandResult<Vec<StagedAttachment>> {
+    let attachments = attachments.unwrap_or_default();
+    let store = if attachments.is_empty() {
+        return Ok(attachments);
+    } else {
+        state.blobs()?
+    };
+    for a in &attachments {
+        if !store.contains(&a.content_hash) {
+            return Err(format!(
+                "{} is no longer available; attach it again",
+                a.filename
+            ));
+        }
+    }
+    Ok(attachments)
 }
 
 #[tauri::command]
@@ -140,19 +170,35 @@ pub fn save_draft(
     parent_id: Option<Uuid>,
     body: String,
     context_ids: Option<Vec<Uuid>>,
+    attachments: Option<Vec<StagedAttachment>>,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    state
-        .repo()?
-        .save_draft_with_context(
+    let attachments = attachments.unwrap_or_default();
+    let removed: Vec<String> = {
+        let mut repo = state.repo()?;
+        let before = repo
+            .get_discussion(discussion_id)
+            .map_err(text)?
+            .draft
+            .map(|d| d.attachments)
+            .unwrap_or_default();
+        repo.save_draft_with_attachments(
             discussion_id,
             parent_id,
             &body,
             &context_ids.unwrap_or_default(),
+            &attachments,
             UnixMillis::now(),
         )
-        .map(|_| ())
-        .map_err(text)
+        .map_err(text)?;
+        before
+            .into_iter()
+            .filter(|b| !attachments.iter().any(|a| a.content_hash == b.content_hash))
+            .map(|b| b.content_hash)
+            .collect()
+    };
+    // Files taken out of the draft are deleted unless something else uses them.
+    state.release(removed)
 }
 
 /// Edits a post by the local user, keeping the previous text as a revision.
@@ -172,18 +218,38 @@ pub fn post_revisions(post_id: Uuid, state: State<'_, AppState>) -> CommandResul
 /// Deletes a post by the local user, leaving a tombstone in the thread.
 #[tauri::command]
 pub fn delete_post(post_id: Uuid, state: State<'_, AppState>) -> CommandResult<Post> {
-    let mut repo = state.repo()?;
-    let me = repo.local_user().map_err(text)?;
-    repo.delete_post(post_id, me.id, UnixMillis::now())
-        .map_err(text)
+    let (post, hashes) = {
+        let mut repo = state.repo()?;
+        let me = repo.local_user().map_err(text)?;
+        let hashes = repo.post_attachments(&[post_id]).map_err(text)?;
+        let post = repo
+            .delete_post(post_id, me.id, UnixMillis::now())
+            .map_err(text)?;
+        (post, hashes)
+    };
+    state.release(hashes.into_iter().map(|a| a.content_hash))?;
+    Ok(post)
 }
 
 #[tauri::command]
 pub fn delete_discussion(id: Uuid, state: State<'_, AppState>) -> CommandResult<()> {
-    state
-        .repo()?
-        .delete_discussion(id, UnixMillis::now())
-        .map_err(text)
+    let hashes: Vec<String> = {
+        let mut repo = state.repo()?;
+        let view = repo.get_discussion(id).map_err(text)?;
+        repo.delete_discussion(id, UnixMillis::now())
+            .map_err(text)?;
+        view.attachments
+            .into_iter()
+            .map(|a| a.content_hash)
+            .chain(
+                view.draft
+                    .into_iter()
+                    .flat_map(|d| d.attachments)
+                    .map(|a| a.content_hash),
+            )
+            .collect()
+    };
+    state.release(hashes)
 }
 
 #[tauri::command]
@@ -306,7 +372,9 @@ pub fn archive_bytes(state: &AppState) -> CommandResult<(Vec<u8>, usize)> {
     let now = UnixMillis::now();
     let archives = nimata_core::import::export_all(&mut *state.repo()?, now).map_err(text)?;
     let mut out = std::io::Cursor::new(Vec::new());
-    nimata_core::import::write_archive(&mut out, &archives, now).map_err(text)?;
+    let store = state.blobs()?;
+    nimata_core::import::write_archive(&mut out, &archives, now, |hash| store.read(hash))
+        .map_err(text)?;
     Ok((out.into_inner(), archives.len()))
 }
 
@@ -347,7 +415,12 @@ pub struct ImportReport {
 /// Imports every discussion in a file's contents; each discussion is all or
 /// nothing, and one failing does not stop the others.
 pub fn import_bytes(state: &AppState, bytes: &[u8]) -> CommandResult<ImportReport> {
-    let (source, archives) = read_import(bytes).map_err(text)?;
+    let file = read_import(bytes).map_err(text)?;
+    let store = state.blobs()?;
+    for bytes in file.files.values() {
+        store.put(bytes).map_err(text)?;
+    }
+    let (source, archives) = (file.source, file.discussions);
     let mut repo = state.repo()?;
     let now = UnixMillis::now();
     let mut report = ImportReport {
@@ -356,7 +429,7 @@ pub fn import_bytes(state: &AppState, bytes: &[u8]) -> CommandResult<ImportRepor
         failures: Vec::new(),
     };
     for archive in &archives {
-        match repo.import_discussion(archive, now) {
+        match repo.import_discussion(archive, now, &|hash| store.contains(hash)) {
             Ok(outcome) => report.outcomes.push(outcome),
             Err(e) => report
                 .failures
@@ -677,8 +750,10 @@ pub fn preview_context(
     participant_id: Uuid,
     draft: Option<String>,
     context_ids: Option<Vec<Uuid>>,
+    attachments: Option<Vec<StagedAttachment>>,
     state: State<'_, AppState>,
 ) -> CommandResult<SentContext> {
+    let store = state.blobs()?.clone();
     let mut repo = state.repo()?;
     let model = repo
         .model_participants()
@@ -687,7 +762,7 @@ pub fn preview_context(
         .find(|m| m.participant.id == participant_id)
         .ok_or("this model is no longer set up in Settings")?;
     let Some(body) = draft else {
-        return generation::context_for(&mut *repo, discussion_id, parent_id, &model, None);
+        return generation::context_for(&mut *repo, &store, discussion_id, parent_id, &model, None);
     };
     let me = repo.local_user().map_err(text)?;
     let now = Timestamp::now();
@@ -710,7 +785,28 @@ pub fn preview_context(
         context_ids: context_ids.unwrap_or_default(),
     };
     let target = unsent.id;
-    generation::context_for(&mut *repo, discussion_id, target, &model, Some(unsent))
+    let files = attachments
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| Attachment {
+            id: Uuid::now_v7(),
+            post_id: target,
+            filename: a.filename,
+            media_type: a.media_type,
+            size: a.size,
+            content_hash: a.content_hash,
+            kind: a.kind,
+            created_at: now.at,
+        })
+        .collect();
+    generation::context_for(
+        &mut *repo,
+        &store,
+        discussion_id,
+        target,
+        &model,
+        Some((unsent, files)),
+    )
 }
 
 /// How many posts a search returns at most.
@@ -741,4 +837,147 @@ pub fn recent_searches(state: State<'_, AppState>) -> CommandResult<Vec<String>>
 #[tauri::command]
 pub fn clear_recent_searches(state: State<'_, AppState>) -> CommandResult<()> {
     state.repo()?.clear_recent_searches().map_err(text)
+}
+
+/// The largest text shown in a preview, in bytes.
+const PREVIEW_BYTES: usize = 512 * 1024;
+
+/// Stores a file the person added to a post they are writing. The body is
+/// the file's metadata as JSON, prefixed with its length (4 bytes, little
+/// endian), followed by the file's bytes.
+#[tauri::command]
+pub async fn stage_attachment(
+    request: tauri::ipc::Request<'_>,
+    state: State<'_, AppState>,
+) -> CommandResult<StagedAttachment> {
+    let tauri::ipc::InvokeBody::Raw(body) = request.body() else {
+        return Err("the file was not sent as raw bytes".into());
+    };
+    let (filename, reported, bytes) = parse_staged(body)?;
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{filename} is larger than {} MB, the most a post can carry",
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+    let (media_type, kind) = classify(&filename, &reported, bytes);
+    let content_hash = state.blobs()?.put(bytes).map_err(text)?;
+    Ok(StagedAttachment {
+        filename: clean_filename(&filename),
+        media_type,
+        size: bytes.len() as u64,
+        content_hash,
+        kind,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StagedMeta {
+    filename: String,
+    #[serde(default)]
+    media_type: String,
+}
+
+fn parse_staged(body: &[u8]) -> CommandResult<(String, String, &[u8])> {
+    let invalid = || "the file could not be read".to_string();
+    let length = body.get(..4).ok_or_else(invalid)?;
+    let length = u32::from_le_bytes(length.try_into().map_err(|_| invalid())?) as usize;
+    let meta = body.get(4..4 + length).ok_or_else(invalid)?;
+    let meta: StagedMeta = serde_json::from_slice(meta).map_err(|_| invalid())?;
+    Ok((meta.filename, meta.media_type, &body[4 + length..]))
+}
+
+/// A file removed from a post before it was sent: its bytes are deleted
+/// unless something else uses them.
+#[tauri::command]
+pub fn discard_staged(content_hash: String, state: State<'_, AppState>) -> CommandResult<()> {
+    state.release([content_hash])
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentText {
+    text: String,
+    /// Only the beginning is shown.
+    truncated: bool,
+}
+
+/// The text of a text attachment, for a preview. `content_hash` also finds
+/// files not yet posted.
+#[tauri::command]
+pub fn attachment_text(
+    content_hash: String,
+    state: State<'_, AppState>,
+) -> CommandResult<AttachmentText> {
+    let bytes = state.blobs()?.read(&content_hash).map_err(text)?;
+    let truncated = bytes.len() > PREVIEW_BYTES;
+    let mut end = bytes.len().min(PREVIEW_BYTES);
+    // Never cut a character in half.
+    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
+        end -= 1;
+    }
+    let text = std::str::from_utf8(&bytes[..end])
+        .map_err(|_| "this file is not text".to_string())?
+        .to_string();
+    Ok(AttachmentText { text, truncated })
+}
+
+/// Asks where to save, then writes a copy of an attached file there.
+#[tauri::command]
+pub async fn save_attachment<R: Runtime>(
+    id: Uuid,
+    app: AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CommandResult<Option<String>> {
+    let attachment = state.repo()?.attachment(id).map_err(text)?;
+    let bytes = state
+        .blobs()?
+        .read(&attachment.content_hash)
+        .map_err(text)?;
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("Save attached file")
+        .set_file_name(&attachment.filename)
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = local_path(file)?;
+    std::fs::write(&path, bytes).map_err(text)?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Serves attached images to the interface as `attachment://localhost/<hex>`
+/// (`http://attachment.localhost/<hex>` on Windows and Android). Only
+/// images are served, with their recorded type; anything else is not found.
+pub fn serve_attachment<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let not_found = || {
+        tauri::http::Response::builder()
+            .status(404)
+            .body(Vec::new())
+            .expect("a fixed response is valid")
+    };
+    let hash = format!("sha256:{}", path.trim_start_matches('/'));
+    let state = app.state::<AppState>();
+    let Ok(Some(media_type)) = state
+        .repo()
+        .and_then(|mut r| r.image_type(&hash).map_err(text))
+    else {
+        return not_found();
+    };
+    let Ok(bytes) = state.blobs().and_then(|s| s.read(&hash).map_err(text)) else {
+        return not_found();
+    };
+    tauri::http::Response::builder()
+        .header("Content-Type", media_type)
+        .header("X-Content-Type-Options", "nosniff")
+        // The address is the content's hash, so it never changes.
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .body(bytes)
+        .expect("headers are valid")
 }

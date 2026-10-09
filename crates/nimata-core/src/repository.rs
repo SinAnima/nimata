@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use crate::attachments::{Attachment, StagedAttachment};
 use crate::domain::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Generation,
     GenerationStatus, ModelParticipant, Participant, Post, ProviderConfig, ProviderKind,
@@ -27,6 +28,20 @@ pub trait Repository {
         title: &str,
         author_id: Uuid,
         body: &str,
+        at: Timestamp,
+    ) -> Result<(Discussion, Post)> {
+        self.start_discussion_with_attachments(title, author_id, body, &[], at)
+    }
+
+    /// Like [`Repository::start_discussion`], with files on the first post.
+    /// The text may then be empty; the title falls back to the first file
+    /// name.
+    fn start_discussion_with_attachments(
+        &mut self,
+        title: &str,
+        author_id: Uuid,
+        body: &str,
+        attachments: &[StagedAttachment],
         at: Timestamp,
     ) -> Result<(Discussion, Post)>;
 
@@ -65,7 +80,47 @@ pub trait Repository {
         body: &str,
         context_ids: &[Uuid],
         at: Timestamp,
+    ) -> Result<Post> {
+        self.add_post_with_attachments(
+            discussion_id,
+            parent_id,
+            author_id,
+            body,
+            context_ids,
+            &[],
+            at,
+        )
+    }
+
+    /// Like [`Repository::add_post_with_context`], with attached files whose
+    /// bytes are already in the blob store. A post with files may have no
+    /// text.
+    #[allow(clippy::too_many_arguments)]
+    fn add_post_with_attachments(
+        &mut self,
+        discussion_id: Uuid,
+        parent_id: Option<Uuid>,
+        author_id: Uuid,
+        body: &str,
+        context_ids: &[Uuid],
+        attachments: &[StagedAttachment],
+        at: Timestamp,
     ) -> Result<Post>;
+
+    fn attachment(&mut self, id: Uuid) -> Result<Attachment>;
+
+    /// The files attached to these posts.
+    fn post_attachments(&mut self, post_ids: &[Uuid]) -> Result<Vec<Attachment>>;
+
+    /// Whether any posted attachment or draft refers to these bytes.
+    fn hash_in_use(&mut self, hash: &str) -> Result<bool>;
+
+    /// Every content hash referred to by an attachment or a draft.
+    fn hashes_in_use(&mut self) -> Result<Vec<String>>;
+
+    /// The media type recorded for `hash` when it is an image, so it can be
+    /// shown.
+    fn image_type(&mut self, hash: &str) -> Result<Option<String>>;
 
     /// Replaces a post's text, keeping the previous text as a revision. Only
     /// the author can edit, and deleted posts cannot be edited. Returns the
@@ -115,6 +170,20 @@ pub trait Repository {
         parent_id: Option<Uuid>,
         body: &str,
         context_ids: &[Uuid],
+        at: UnixMillis,
+    ) -> Result<Option<Draft>> {
+        self.save_draft_with_attachments(discussion_id, parent_id, body, context_ids, &[], at)
+    }
+
+    /// Like [`Repository::save_draft_with_context`], keeping files added to
+    /// the unsent post.
+    fn save_draft_with_attachments(
+        &mut self,
+        discussion_id: Uuid,
+        parent_id: Option<Uuid>,
+        body: &str,
+        context_ids: &[Uuid],
+        attachments: &[StagedAttachment],
         at: UnixMillis,
     ) -> Result<Option<Draft>>;
 
@@ -248,10 +317,14 @@ pub trait Repository {
     /// adds only posts this device does not have. Posts already here are
     /// left as they are. A discussion deleted here stays deleted. Posts by
     /// the archive's `local_user` become the local user's.
+    ///
+    /// Attachments of added posts are recorded when `available` says their
+    /// bytes are in the blob store; the others are counted as missing.
     fn import_discussion(
         &mut self,
         archive: &crate::archive::DiscussionArchive,
         at: UnixMillis,
+        available: &dyn Fn(&str) -> bool,
     ) -> Result<crate::import::ImportOutcome>;
 }
 

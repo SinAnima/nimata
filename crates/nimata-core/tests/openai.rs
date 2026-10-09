@@ -18,6 +18,7 @@ fn request() -> ModelRequest {
         messages: vec![Message {
             role: Role::User,
             text: "Thanos:\nShould Nimata use CouchDB?".into(),
+            files: vec![],
         }],
     }
 }

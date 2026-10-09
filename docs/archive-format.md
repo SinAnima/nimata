@@ -93,19 +93,20 @@ the file. Fields without a value are omitted.
 
 #### `posts[]`
 
-| Field              | Meaning                                                                                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`               | UUID of the post.                                                                                                                                        |
-| `parentId`         | The post this one replies to, or `null` for a new thread.                                                                                                |
-| `authorId`         | A participant `id`.                                                                                                                                      |
-| `createdAt`        | When it was written, in the author's own UTC offset.                                                                                                     |
-| `status`           | `complete`; model replies can also be `failed` or `cancelled`.                                                                                           |
-| `body`             | The current text. Empty for a deleted post.                                                                                                              |
-| `editedAt`         | When the text was last changed, UTC. Omitted if never edited.                                                                                            |
-| `deletedAt`        | When the post was deleted, UTC. Omitted unless deleted.                                                                                                  |
-| `revisions`        | Earlier versions, oldest first. Omitted when there are none.                                                                                             |
-| `providerMetadata` | For model replies: `provider`, `model` (exact version), `responseId`, `requestId`, `inputTokens`, `outputTokens`, `incompleteReason`. Omitted otherwise. |
-| `contextIds`       | Other posts the author chose as context, besides the one replied to. Omitted when empty.                                                                 |
+| Field              | Meaning                                                                                                                                                                                                                            |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`               | UUID of the post.                                                                                                                                                                                                                  |
+| `parentId`         | The post this one replies to, or `null` for a new thread.                                                                                                                                                                          |
+| `authorId`         | A participant `id`.                                                                                                                                                                                                                |
+| `createdAt`        | When it was written, in the author's own UTC offset.                                                                                                                                                                               |
+| `status`           | `complete`; model replies can also be `failed` or `cancelled`.                                                                                                                                                                     |
+| `body`             | The current text. Empty for a deleted post.                                                                                                                                                                                        |
+| `editedAt`         | When the text was last changed, UTC. Omitted if never edited.                                                                                                                                                                      |
+| `deletedAt`        | When the post was deleted, UTC. Omitted unless deleted.                                                                                                                                                                            |
+| `revisions`        | Earlier versions, oldest first. Omitted when there are none.                                                                                                                                                                       |
+| `providerMetadata` | For model replies: `provider`, `model` (exact version), `responseId`, `requestId`, `inputTokens`, `outputTokens`, `incompleteReason`. Omitted otherwise.                                                                           |
+| `attachments`      | Files attached to the post: `id`, `filename`, `mediaType`, `size`, `contentHash` (`sha256:<hex>`), `kind` (`text`, `image`, `pdf`, `other`), `createdAt`. Omitted when empty. The bytes are not in this file; archives carry them. |
+| `contextIds`       | Other posts the author chose as context, besides the one replied to. Omitted when empty.                                                                                                                                           |
 
 A deleted post stays in the file with an empty body so that replies to it
 still have a parent. Its revisions are erased when it is deleted.
@@ -145,7 +146,7 @@ Settings, Data, **Export all discussions…** writes a zip named
 ```
 manifest.json
 discussions/<discussion id>.json    one nimata/1 file per discussion
-attachments/<sha256>                from Stage 8; none yet
+attachments/<hex of the sha256>     the bytes of every attached file
 ```
 
 `manifest.json`:
@@ -162,9 +163,15 @@ attachments/<sha256>                from Stage 8; none yet
       "posts": 3
     }
   ],
-  "attachments": []
+  "attachments": [
+    "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  ]
 }
 ```
+
+`attachments` lists the files the archive carries. Each is stored once,
+however many posts it is attached to; a file not on the exporting device is
+listed on its post but not carried.
 
 Active and archived discussions are included; deleted ones are not.
 Drafts, providers, model settings, recent searches, and API keys are not
@@ -200,6 +207,9 @@ Rules:
   of it is added, the others still are, and the reason is shown.
 - A reply that was still being written when exported is imported as
   failed, keeping its text.
+- **Files are checked.** Every file in an archive must match its hash, or
+  the import stops before changing anything. A file listed on a post but
+  not carried is left out and counted in the summary.
 
 ### ChatGPT
 

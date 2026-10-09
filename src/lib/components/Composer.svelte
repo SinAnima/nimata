@@ -9,6 +9,8 @@
   import AskLine from "./AskLine.svelte";
   import { previewContext } from "../api";
   import { showContext } from "../stores/contextView.svelte";
+  import { carriesFiles, droppedFiles } from "../attach";
+  import StagedFiles from "./StagedFiles.svelte";
 
   interface Props {
     discussionId: Uuid;
@@ -62,11 +64,39 @@
     return matches;
   });
 
+  /** Files still being stored, and whether files are being dragged over. */
+  let staging = $state(0);
+  let dragging = $state(false);
+  let picker: HTMLInputElement | undefined = $state();
+
   const canPost = $derived(
-    current.draft.trim() !== "" &&
+    (current.draft.trim() !== "" || current.attachments.length > 0) &&
       target !== undefined &&
-      problems.length === 0,
+      problems.length === 0 &&
+      staging === 0,
   );
+
+  async function attach(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+    await notebook.stageFiles(
+      files,
+      (file) => composers.addAttachment(discussionId, file),
+      (remaining) => (staging = remaining),
+    );
+  }
+
+  function onDragOver(event: DragEvent): void {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    dragging = true;
+  }
+
+  function onDrop(event: DragEvent): void {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    dragging = false;
+    void attach(droppedFiles(event));
+  }
   let posting = $state(false);
 
   /** The posts chosen as context, for the chips above the text box. */
@@ -92,6 +122,7 @@
         model.participant.id,
         current.draft,
         current.context,
+        current.attachments,
       ),
     );
   }
@@ -142,8 +173,15 @@
 </script>
 
 <form
-  class="border-t border-rule bg-surface px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-8"
+  class={[
+    "border-t border-rule bg-surface px-5 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-8",
+    dragging &&
+      "bg-accent-soft/60 outline-2 outline-accent outline-dashed -outline-offset-4",
+  ]}
   aria-label="Compose a post"
+  ondragover={onDragOver}
+  ondragleave={() => (dragging = false)}
+  ondrop={onDrop}
   onsubmit={(e) => {
     e.preventDefault();
     void submit();
@@ -196,6 +234,13 @@
     </div>
   {/if}
 
+  <StagedFiles
+    files={current.attachments}
+    {staging}
+    answerers={answerers.models}
+    onRemove={(i) => notebook.removeStaged(discussionId, i)}
+  />
+
   <div class="mt-2 flex items-end gap-3">
     <label class="min-w-0 flex-1">
       <span class="sr-only">Post text</span>
@@ -216,6 +261,28 @@
         onclick={trackCursor}
         onkeydown={onKeydown}></textarea>
     </label>
+    <input
+      bind:this={picker}
+      type="file"
+      multiple
+      class="hidden"
+      aria-hidden="true"
+      tabindex="-1"
+      data-attach-input
+      onchange={(e) => {
+        const files = [...(e.currentTarget.files ?? [])];
+        e.currentTarget.value = "";
+        void attach(files);
+      }}
+    />
+    <button
+      type="button"
+      class="min-h-10 rounded border border-rule px-3 text-sm hover:bg-accent-soft"
+      title="Attach files (or drop them here)"
+      onclick={() => picker?.click()}
+    >
+      Attach…
+    </button>
     <button
       type="submit"
       class="min-h-10 rounded bg-accent px-4 text-sm font-medium text-surface disabled:opacity-45"

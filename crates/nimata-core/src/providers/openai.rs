@@ -9,7 +9,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 
 use super::{
-    Completion, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
+    Completion, FileKind, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
     ResponseStream, Role, StreamEvent, Usage, header, network_error, sse_stream, status_error,
 };
 
@@ -39,7 +39,19 @@ impl OpenAi {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 };
-                json!({ "role": role, "content": m.text })
+                if m.files.is_empty() {
+                    return json!({ "role": role, "content": m.text });
+                }
+                let mut content = vec![json!({ "type": "input_text", "text": m.text })];
+                content.extend(m.files.iter().map(|f| match f.kind {
+                    FileKind::Image => json!({ "type": "input_image", "image_url": f.data_url() }),
+                    FileKind::Pdf => json!({
+                        "type": "input_file",
+                        "filename": f.filename,
+                        "file_data": f.data_url(),
+                    }),
+                }));
+                json!({ "role": role, "content": content })
             })
             .collect();
         json!({
@@ -263,10 +275,12 @@ mod tests {
                 Message {
                     role: Role::User,
                     text: "Thanos:\nQuestion".into(),
+                    files: vec![],
                 },
                 Message {
                     role: Role::Assistant,
                     text: "Answer".into(),
+                    files: vec![],
                 },
             ],
         });
@@ -402,5 +416,41 @@ mod tests {
         assert!(e.detail.unwrap().contains("something new"));
         let Some(Err(e)) = limited else { panic!() };
         assert_eq!(e.kind, ProviderErrorKind::RateLimit);
+    }
+
+    #[test]
+    fn files_are_sent_as_input_parts() {
+        use crate::providers::FilePart;
+        let request = ModelRequest {
+            model: "gpt-5.6".into(),
+            instructions: "Be brief.".into(),
+            messages: vec![Message {
+                role: Role::User,
+                text: "Thanos:\nSee attached.".into(),
+                files: vec![
+                    FilePart {
+                        filename: "a.png".into(),
+                        media_type: "image/png".into(),
+                        kind: FileKind::Image,
+                        data: b"png".to_vec(),
+                    },
+                    FilePart {
+                        filename: "p.pdf".into(),
+                        media_type: "application/pdf".into(),
+                        kind: FileKind::Pdf,
+                        data: b"%PDF".to_vec(),
+                    },
+                ],
+            }],
+        };
+        let body = OpenAi::request_body(&request);
+        assert_eq!(
+            body["input"][0]["content"],
+            json!([
+                { "type": "input_text", "text": "Thanos:\nSee attached." },
+                { "type": "input_image", "image_url": "data:image/png;base64,cG5n" },
+                { "type": "input_file", "filename": "p.pdf", "file_data": "data:application/pdf;base64,JVBERg==" },
+            ])
+        );
     }
 }

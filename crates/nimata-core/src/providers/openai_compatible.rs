@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 
 use super::{
-    Completion, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
+    Completion, FileKind, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
     ResponseStream, Role, StreamEvent, Usage, header, network_error, sse_stream, status_error,
 };
 
@@ -43,7 +43,19 @@ impl OpenAiCompatible {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            json!({ "role": role, "content": m.text })
+            // Only images, and only when the connection accepts them.
+            let images: Vec<Value> = m
+                .files
+                .iter()
+                .filter(|f| f.kind == FileKind::Image)
+                .map(|f| json!({ "type": "image_url", "image_url": { "url": f.data_url() } }))
+                .collect();
+            if images.is_empty() {
+                return json!({ "role": role, "content": m.text });
+            }
+            let mut content = vec![json!({ "type": "text", "text": m.text })];
+            content.extend(images);
+            json!({ "role": role, "content": content })
         }));
         let mut body = json!({ "model": request.model, "messages": messages, "stream": true });
         if with_usage {
@@ -217,6 +229,7 @@ mod tests {
                 messages: vec![Message {
                     role: Role::User,
                     text: "Thanos:\nHi".into(),
+                    files: vec![],
                 }],
             },
             true,
@@ -286,5 +299,40 @@ mod tests {
             panic!()
         };
         assert_eq!(e.detail.as_deref(), Some("out of memory"));
+    }
+
+    #[test]
+    fn images_are_sent_as_image_urls_and_pdfs_never() {
+        use crate::providers::FilePart;
+        let request = ModelRequest {
+            model: "llava".into(),
+            instructions: "Be brief.".into(),
+            messages: vec![Message {
+                role: Role::User,
+                text: "See attached.".into(),
+                files: vec![
+                    FilePart {
+                        filename: "a.png".into(),
+                        media_type: "image/png".into(),
+                        kind: FileKind::Image,
+                        data: b"png".to_vec(),
+                    },
+                    FilePart {
+                        filename: "p.pdf".into(),
+                        media_type: "application/pdf".into(),
+                        kind: FileKind::Pdf,
+                        data: b"%PDF".to_vec(),
+                    },
+                ],
+            }],
+        };
+        let body = OpenAiCompatible::request_body(&request, false);
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([
+                { "type": "text", "text": "See attached." },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,cG5n" } },
+            ])
+        );
     }
 }

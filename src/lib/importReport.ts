@@ -42,6 +42,13 @@ export function describeImport(report: ImportReport): string {
   if (deleted.length > 0) {
     text += ` ${plural(deleted.length, "discussion you deleted was", "discussions you deleted were")} left out.`;
   }
+  const missing = report.outcomes.reduce(
+    (sum, o) => sum + (o.attachmentsMissing ?? 0),
+    0,
+  );
+  if (missing > 0) {
+    text += ` ${plural(missing, "attached file was", "attached files were")} not in the file and ${missing === 1 ? "was" : "were"} left out.`;
+  }
   if (report.failures.length > 0) {
     text += ` ${plural(report.failures.length, "discussion")} could not be imported: ${report.failures.join("; ")}`;
   }

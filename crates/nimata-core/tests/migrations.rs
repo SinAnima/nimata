@@ -326,3 +326,50 @@ fn a_version_5_database_is_searchable_after_upgrading() {
         1
     );
 }
+
+#[test]
+fn a_version_6_database_takes_attachments_after_upgrading() {
+    let dir = TempDir::new().unwrap();
+    let path = database_from("tests/fixtures/schema_v6.sql", &dir);
+    let mut repo = SqliteRepository::open(&path).unwrap();
+    let discussion = id("01a109b0-0000-7000-8000-000000000006");
+    let view = repo.get_discussion(discussion).unwrap();
+    assert_eq!(view.posts[0].body, "Threads, before attachments.");
+    let draft = view.draft.unwrap();
+    assert_eq!(draft.body, "An unsent reply.");
+    assert!(draft.attachments.is_empty());
+    assert!(view.attachments.is_empty());
+    assert_eq!(repo.recent_searches(10).unwrap(), vec!["νηματα"]);
+    assert_eq!(
+        repo.search(&nimata_core::search::parse("threads"), 10)
+            .unwrap()
+            .posts
+            .len(),
+        1
+    );
+
+    let notes = nimata_core::attachments::StagedAttachment {
+        filename: "notes.md".into(),
+        media_type: "text/markdown".into(),
+        size: 7,
+        content_hash: nimata_core::attachments::content_hash(b"# Notes"),
+        kind: nimata_core::attachments::AttachmentKind::Text,
+    };
+    let me = repo.local_user().unwrap().id;
+    repo.add_post_with_attachments(
+        discussion,
+        Some(view.posts[0].id),
+        me,
+        "",
+        &[],
+        &[notes],
+        nimata_core::Timestamp {
+            at: UnixMillis(1_791_600_000_000),
+            offset_minutes: 0,
+        },
+    )
+    .unwrap();
+    let view = repo.get_discussion(discussion).unwrap();
+    assert_eq!(view.attachments[0].filename, "notes.md");
+    assert!(view.draft.is_none(), "posting clears the draft");
+}
