@@ -50,6 +50,10 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::export_markdown,
         commands::export_archive,
         commands::import_file,
+        commands::stage_attachment,
+        commands::discard_staged,
+        commands::attachment_text,
+        commands::save_attachment,
     ])
 }
 
@@ -59,6 +63,14 @@ pub fn run() {
     nimata_core::providers::install_crypto_provider();
     with_commands(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        // Attached images, read off the main thread.
+        .register_asynchronous_uri_scheme_protocol("attachment", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_string();
+            std::thread::spawn(move || {
+                responder.respond(commands::serve_attachment(&app, &path));
+            });
+        })
         .manage(secrets::Keys::os())
         .manage(generation::Generations::default())
         .setup(|app| {

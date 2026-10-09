@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { isSubmitShortcut, MODIFIER_LABEL } from "../keys";
   import { notebook } from "../stores/notebook.svelte";
   import { whoAnswers, type AskChoice } from "../compose";
   import AskLine from "./AskLine.svelte";
+  import StagedFiles from "./StagedFiles.svelte";
+  import type { StagedAttachment } from "../types";
+  import { carriesFiles, droppedFiles } from "../attach";
 
   let { onCancel }: { onCancel: () => void } = $props();
 
@@ -23,22 +26,44 @@
   );
   let bodyField: HTMLTextAreaElement | undefined = $state();
 
+  /** Files for the first post. Nothing keeps them until it is posted. */
+  let files: StagedAttachment[] = $state([]);
+  let staging = $state(0);
+  let dragging = $state(false);
+  let picker: HTMLInputElement | undefined = $state();
+
+  const canStart = $derived(
+    (body.trim() !== "" || files.length > 0) &&
+      !starting &&
+      staging === 0 &&
+      answerers.mentions.problems.length === 0,
+  );
+
   onMount(() => bodyField?.focus());
 
+  // Files added but never posted are deleted when the form goes away.
+  onDestroy(() => {
+    for (const file of files) void notebook.discardStaged(file);
+  });
+
+  async function attach(chosen: File[]): Promise<void> {
+    await notebook.stageFiles(
+      chosen,
+      (file) => (files = [...files, file]),
+      (remaining) => (staging = remaining),
+    );
+  }
+
   async function submit(): Promise<void> {
-    if (
-      body.trim() === "" ||
-      starting ||
-      answerers.mentions.problems.length > 0
-    )
-      return;
+    if (!canStart) return;
     starting = true;
-    const started = await notebook.start(title, body, answerers.models);
+    const started = await notebook.start(title, body, answerers.models, files);
     starting = false;
     if (started) {
       title = "";
       body = "";
       choice = null;
+      files = [];
     }
   }
 
@@ -73,7 +98,23 @@
   </header>
 
   <form
-    class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-5 sm:px-8"
+    class={[
+      "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 py-5 sm:px-8",
+      dragging &&
+        "bg-accent-soft/60 outline-2 outline-accent outline-dashed -outline-offset-4",
+    ]}
+    ondragover={(e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      dragging = true;
+    }}
+    ondragleave={() => (dragging = false)}
+    ondrop={(e) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      dragging = false;
+      void attach(droppedFiles(e));
+    }}
     onsubmit={(e) => {
       e.preventDefault();
       void submit();
@@ -98,7 +139,19 @@
         bind:value={body}
         onkeydown={onKeydown}></textarea>
     </label>
-    <div class="max-w-3xl"><AskLine {answerers} bind:choice /></div>
+    <div class="max-w-3xl">
+      <StagedFiles
+        {files}
+        {staging}
+        answerers={answerers.models}
+        onRemove={(i) => {
+          const [removed] = files.splice(i, 1);
+          files = [...files];
+          if (removed) void notebook.discardStaged(removed);
+        }}
+      />
+      <AskLine {answerers} bind:choice />
+    </div>
     <div
       class="flex max-w-3xl items-center justify-end gap-3 pb-[env(safe-area-inset-bottom)]"
     >
@@ -109,12 +162,32 @@
       >
         Cancel
       </button>
+      <input
+        bind:this={picker}
+        type="file"
+        multiple
+        class="hidden"
+        aria-hidden="true"
+        tabindex="-1"
+        data-attach-input
+        onchange={(e) => {
+          const chosen = [...(e.currentTarget.files ?? [])];
+          e.currentTarget.value = "";
+          void attach(chosen);
+        }}
+      />
+      <button
+        type="button"
+        class="mr-auto min-h-10 rounded border border-rule px-3 text-sm hover:bg-accent-soft"
+        title="Attach files (or drop them here)"
+        onclick={() => picker?.click()}
+      >
+        Attach…
+      </button>
       <button
         type="submit"
         class="min-h-10 rounded bg-accent px-4 text-sm font-medium text-surface disabled:opacity-45"
-        disabled={body.trim() === "" ||
-          starting ||
-          answerers.mentions.problems.length > 0}
+        disabled={!canStart}
         title="Start discussion ({MODIFIER_LABEL}Enter)"
       >
         Start discussion

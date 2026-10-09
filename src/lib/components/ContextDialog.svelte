@@ -21,6 +21,11 @@
     trimmed: "left out to fit",
   };
   const number = (n: number) => n.toLocaleString();
+  const fileReasons = {
+    unsupported: "this model cannot read this kind of file",
+    too_large: "too large for this model",
+    missing: "not available on this device",
+  };
 </script>
 
 <dialog
@@ -75,9 +80,31 @@
             >
               {message.text}
             </p>
+            {#if message.attachments && message.attachments.some((a) => a.delivery !== "text")}
+              <p class="mt-1 text-xs text-muted">
+                Sent as files: {message.attachments
+                  .filter((a) => a.delivery !== "text")
+                  .map(
+                    (a) =>
+                      `${a.filename} (${a.delivery === "pdf" ? "PDF" : "image"})`,
+                  )
+                  .join(", ")}
+              </p>
+            {/if}
           </li>
         {/each}
       </ol>
+
+      {#if sent.omittedAttachments && sent.omittedAttachments.length > 0}
+        <section class="mt-4" aria-label="Files not sent">
+          <h3 class="text-sm font-medium">Files not sent</h3>
+          <ul class="mt-1 space-y-1 text-sm text-muted">
+            {#each sent.omittedAttachments as file (file.id)}
+              <li>{file.filename} ({fileReasons[file.reason]})</li>
+            {/each}
+          </ul>
+        </section>
+      {/if}
 
       {#if sent.omitted.length > 0}
         <section class="mt-4" aria-label="Left out">

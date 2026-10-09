@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type {
+    Attachment,
     Generation,
     ModelParticipant,
     Participant,
@@ -15,9 +16,12 @@
   import { search } from "../stores/search.svelte";
   import { highlightParts } from "../search";
   import ParticipantMark from "./ParticipantMark.svelte";
+  import AttachmentList from "./AttachmentList.svelte";
 
   interface Props {
     post: Post;
+    /** Files attached to the post. */
+    attachments?: Attachment[];
     author: Participant | undefined;
     parent: Post | undefined;
     parentAuthorName: string;
@@ -62,6 +66,7 @@
     quoteParent,
     now,
     flashing,
+    attachments = [],
     isReplyTarget,
     isMine,
     canDelete,
@@ -470,6 +475,10 @@
           </p>
         {/each}
       </div>
+    {/if}
+
+    {#if attachments.length > 0}
+      <AttachmentList {attachments} />
     {/if}
 
     {#if post.status === "streaming"}

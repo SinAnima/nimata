@@ -6,8 +6,9 @@ use reqwest::Client;
 use serde_json::{Value, json};
 
 use super::{
-    Completion, Message, ModelInfo, ModelProvider, ModelRequest, ProviderError, ProviderErrorKind,
-    ResponseStream, Role, StreamEvent, Usage, header, network_error, sse_stream, status_error,
+    Completion, FileKind, Message, ModelInfo, ModelProvider, ModelRequest, ProviderError,
+    ProviderErrorKind, ResponseStream, Role, StreamEvent, Usage, header, network_error, sse_stream,
+    status_error,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -52,6 +53,7 @@ impl Anthropic {
             out.push(Message {
                 role: Role::User,
                 text: "(The discussion so far follows.)".into(),
+                files: vec![],
             });
         }
         out.extend(messages.iter().cloned());
@@ -59,6 +61,7 @@ impl Anthropic {
             out.push(Message {
                 role: Role::User,
                 text: "(Please follow up on your last post above.)".into(),
+                files: vec![],
             });
         }
         out
@@ -72,7 +75,27 @@ impl Anthropic {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                 };
-                json!({ "role": role, "content": m.text })
+                if m.files.is_empty() {
+                    return json!({ "role": role, "content": m.text });
+                }
+                // Files first, then the text that refers to them.
+                let mut content: Vec<Value> = m
+                    .files
+                    .iter()
+                    .map(|f| match f.kind {
+                        FileKind::Image => json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": f.media_type, "data": f.base64() },
+                        }),
+                        FileKind::Pdf => json!({
+                            "type": "document",
+                            "source": { "type": "base64", "media_type": "application/pdf", "data": f.base64() },
+                            "title": f.filename,
+                        }),
+                    })
+                    .collect();
+                content.push(json!({ "type": "text", "text": m.text }));
+                json!({ "role": role, "content": content })
             })
             .collect();
         json!({
@@ -281,6 +304,7 @@ mod tests {
         Message {
             role,
             text: text.into(),
+            files: vec![],
         }
     }
 
@@ -377,5 +401,41 @@ mod tests {
         };
         assert!(e.message.contains("overloaded"));
         assert_eq!(e.detail.as_deref(), Some("Overloaded"));
+    }
+
+    #[test]
+    fn files_are_sent_as_blocks_before_the_text() {
+        use crate::providers::FilePart;
+        let request = ModelRequest {
+            model: "claude-opus-5-5".into(),
+            instructions: "Be brief.".into(),
+            messages: vec![Message {
+                role: Role::User,
+                text: "Thanos:\nSee attached.".into(),
+                files: vec![
+                    FilePart {
+                        filename: "a.png".into(),
+                        media_type: "image/png".into(),
+                        kind: FileKind::Image,
+                        data: b"png".to_vec(),
+                    },
+                    FilePart {
+                        filename: "p.pdf".into(),
+                        media_type: "application/pdf".into(),
+                        kind: FileKind::Pdf,
+                        data: b"%PDF".to_vec(),
+                    },
+                ],
+            }],
+        };
+        let body = Anthropic::request_body(&request, 1000);
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "cG5n" } },
+                { "type": "document", "source": { "type": "base64", "media_type": "application/pdf", "data": "JVBERg==" }, "title": "p.pdf" },
+                { "type": "text", "text": "Thanos:\nSee attached." },
+            ])
+        );
     }
 }

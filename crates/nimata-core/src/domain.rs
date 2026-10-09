@@ -228,6 +228,9 @@ pub struct DiscussionView {
     pub posts: Vec<Post>,
     pub participants: Vec<Participant>,
     pub draft: Option<Draft>,
+    /// Files attached to the posts, by post, in the order attached.
+    #[serde(default)]
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 
 /// An unsent post, kept per discussion so it survives navigation and restarts.
@@ -241,6 +244,9 @@ pub struct Draft {
     /// Posts chosen as context for the unsent post.
     #[serde(default)]
     pub context_ids: Vec<Uuid>,
+    /// Files added to the unsent post.
+    #[serde(default)]
+    pub attachments: Vec<crate::attachments::StagedAttachment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

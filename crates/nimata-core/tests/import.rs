@@ -3,7 +3,9 @@
 
 use nimata_core::archive::DiscussionArchive;
 use nimata_core::domain::{GenerationStatus, ProviderKind, ProviderMetadata};
-use nimata_core::import::{ImportResult, ImportSource, export_all, read_import, write_archive};
+use nimata_core::import::{
+    ImportFile, ImportResult, ImportSource, export_all, read_import, write_archive,
+};
 use nimata_core::repository::GenerationOutcome;
 use nimata_core::search::parse;
 use nimata_core::{Repository, SqliteRepository, Timestamp, UnixMillis};
@@ -158,17 +160,24 @@ fn comparable(archive: &DiscussionArchive) -> Value {
 
 fn zipped(archives: &[DiscussionArchive]) -> Vec<u8> {
     let mut out = std::io::Cursor::new(Vec::new());
-    write_archive(&mut out, archives, UnixMillis(T0 + 60 * MIN)).unwrap();
+    write_archive(&mut out, archives, UnixMillis(T0 + 60 * MIN), |_| {
+        Err(nimata_core::Error::NotFound("file"))
+    })
+    .unwrap();
     out.into_inner()
 }
 
 fn import_all(d: &mut Device, bytes: &[u8]) -> Vec<nimata_core::import::ImportOutcome> {
-    let (_, archives) = read_import(bytes).unwrap();
+    let ImportFile {
+        source: _,
+        discussions: archives,
+        ..
+    } = read_import(bytes).unwrap();
     archives
         .iter()
         .map(|a| {
             d.repo
-                .import_discussion(a, UnixMillis(T0 + 90 * MIN))
+                .import_discussion(a, UnixMillis(T0 + 90 * MIN), &|_| false)
                 .unwrap()
         })
         .collect()
@@ -341,7 +350,7 @@ fn a_conflicting_archive_changes_nothing() {
     });
     let error = original
         .repo
-        .import_discussion(&forged, UnixMillis(0))
+        .import_discussion(&forged, UnixMillis(0), &|_| false)
         .unwrap_err();
     assert!(error.to_string().contains("another discussion"), "{error}");
     assert!(
@@ -356,12 +365,16 @@ fn a_single_discussion_file_imports_too() {
     let one = export_all(&mut original.repo, UnixMillis(0))
         .unwrap()
         .remove(0);
-    let (source, archives) = read_import(one.to_json().as_bytes()).unwrap();
+    let ImportFile {
+        source,
+        discussions: archives,
+        ..
+    } = read_import(one.to_json().as_bytes()).unwrap();
     assert_eq!(source, ImportSource::NimataDiscussion);
     let mut fresh = device();
     let o = fresh
         .repo
-        .import_discussion(&archives[0], UnixMillis(0))
+        .import_discussion(&archives[0], UnixMillis(0), &|_| false)
         .unwrap();
     assert_eq!((o.result, o.posts_added), (ImportResult::Added, 5));
 }
@@ -382,11 +395,15 @@ fn chatgpt_conversations_become_discussions_once() {
     }])
     .to_string();
     let mut d = device();
-    let (source, archives) = read_import(export.as_bytes()).unwrap();
+    let ImportFile {
+        source,
+        discussions: archives,
+        ..
+    } = read_import(export.as_bytes()).unwrap();
     assert_eq!(source, ImportSource::ChatGpt);
     let o = d
         .repo
-        .import_discussion(&archives[0], UnixMillis(0))
+        .import_discussion(&archives[0], UnixMillis(0), &|_| false)
         .unwrap();
     assert_eq!((o.result, o.posts_added), (ImportResult::Added, 2));
 
@@ -411,7 +428,14 @@ fn chatgpt_conversations_become_discussions_once() {
     // Imported models are authors, not models that can be asked.
     assert!(d.repo.model_participants().unwrap().is_empty());
 
-    let (_, again) = read_import(export.as_bytes()).unwrap();
-    let o = d.repo.import_discussion(&again[0], UnixMillis(0)).unwrap();
+    let ImportFile {
+        source: _,
+        discussions: again,
+        ..
+    } = read_import(export.as_bytes()).unwrap();
+    let o = d
+        .repo
+        .import_discussion(&again[0], UnixMillis(0), &|_| false)
+        .unwrap();
     assert_eq!(o.result, ImportResult::Unchanged);
 }

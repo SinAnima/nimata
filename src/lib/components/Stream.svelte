@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { DiscussionView, Post, Uuid } from "../types";
+  import type { Attachment, DiscussionView, Post, Uuid } from "../types";
   import {
     authorName,
     chronological,
@@ -20,6 +20,13 @@
   const posts = $derived(chronological(view.posts));
   const postsById = $derived(indexById(view.posts));
   const participantsById = $derived(indexById(view.participants));
+  const attachmentsByPost = $derived.by(() => {
+    const byPost = new Map<Uuid, Attachment[]>();
+    for (const a of view.attachments ?? []) {
+      byPost.set(a.postId, [...(byPost.get(a.postId) ?? []), a]);
+    }
+    return byPost;
+  });
   const nameOf = (id: Uuid) => authorName(participantsById, id);
   const composerContext = $derived(
     notebook.composers.get(view.discussion.id).context,
@@ -156,6 +163,7 @@
             quoteParent={shouldQuoteParent(post, posts[i - 1])}
             now={clock.now}
             flashing={flashingId === post.id}
+            attachments={attachmentsByPost.get(post.id)}
             isReplyTarget={replyTo === post.id}
             isMine={post.authorId === notebook.me?.id}
             canDelete={post.authorId === notebook.me?.id ||

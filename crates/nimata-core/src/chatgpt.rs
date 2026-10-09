@@ -226,6 +226,7 @@ fn conversation(value: &Value, index: usize) -> Result<Option<DiscussionArchive>
                     incomplete_reason: None,
                 }),
                 context_ids: vec![],
+                attachments: vec![],
             },
         ));
     }

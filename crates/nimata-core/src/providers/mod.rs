@@ -34,6 +34,47 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub text: String,
+    /// Images and PDFs sent with the text, for providers that accept them.
+    /// Text files are already part of `text`.
+    #[serde(skip)]
+    pub files: Vec<FilePart>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Image,
+    Pdf,
+}
+
+/// A file's bytes, as sent to a provider.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FilePart {
+    pub filename: String,
+    pub media_type: String,
+    pub kind: FileKind,
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for FilePart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilePart")
+            .field("filename", &self.filename)
+            .field("media_type", &self.media_type)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
+impl FilePart {
+    /// The bytes as a `data:` URL.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.base64())
+    }
+
+    pub fn base64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&self.data)
+    }
 }
 
 /// What is sent to a provider for one reply.
@@ -181,6 +222,44 @@ pub struct Capabilities {
     pub streaming: bool,
     /// Token counts are reported.
     pub usage: bool,
+    /// Images can be sent to its models.
+    pub images: bool,
+    /// PDF documents can be sent to its models.
+    pub pdfs: bool,
+}
+
+/// Which attached files a kind of provider accepts, and how large. Text
+/// files go to every model, inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FileSupport {
+    pub images: bool,
+    pub pdfs: bool,
+    pub max_image_bytes: u64,
+    pub max_pdf_bytes: u64,
+}
+
+pub fn file_support(kind: ProviderKind) -> FileSupport {
+    const MB: u64 = 1024 * 1024;
+    match kind {
+        // Responses API: input_image and input_file (PDF), up to 50 MB per
+        // request; images up to 20 MB.
+        ProviderKind::OpenAi => FileSupport {
+            images: true,
+            pdfs: true,
+            max_image_bytes: 20 * MB,
+            max_pdf_bytes: 32 * MB,
+        },
+        // Messages API: image blocks up to 5 MB, PDF documents up to 32 MB
+        // per request.
+        ProviderKind::Anthropic => FileSupport {
+            images: true,
+            pdfs: true,
+            max_image_bytes: 5 * MB,
+            max_pdf_bytes: 30 * MB,
+        },
+        // Servers differ, and most local models read text only.
+        ProviderKind::OpenAiCompatible => FileSupport::default(),
+    }
 }
 
 pub fn capabilities(kind: ProviderKind) -> Capabilities {
@@ -192,6 +271,8 @@ pub fn capabilities(kind: ProviderKind) -> Capabilities {
             model_discovery: true,
             streaming: true,
             usage: true,
+            images: true,
+            pdfs: true,
         },
         ProviderKind::OpenAiCompatible => Capabilities {
             requires_key: false,
@@ -201,6 +282,8 @@ pub fn capabilities(kind: ProviderKind) -> Capabilities {
             streaming: true,
             // Many servers report usage only when asked, and some never do.
             usage: false,
+            images: false,
+            pdfs: false,
         },
     }
 }

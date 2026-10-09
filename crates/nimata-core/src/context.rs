@@ -5,15 +5,178 @@
 //! ("Include as context") are carried down to every later reply, and sent in
 //! a labelled message so the model can tell them apart from the chain.
 //! Other discussions are never included.
+//!
+//! Files attached to those posts go with them: text files inline, images
+//! and PDFs as files when the provider accepts them. A file a model cannot
+//! take is named in the text, so it knows the file exists, and listed as
+//! left out.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::attachments::{Attachment, AttachmentKind};
 use crate::domain::{Participant, Post, PostStatus};
 use crate::error::{Error, Result};
-use crate::providers::{Message, ModelRequest, Role};
+use crate::providers::{FileKind, FilePart, FileSupport, Message, ModelRequest, Role};
+
+/// The longest text file sent inline, in characters.
+pub const MAX_INLINE_TEXT_CHARS: usize = 200_000;
+
+/// The files attached to the posts, and what the model accepts.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Files<'a> {
+    pub attachments: &'a [Attachment],
+    /// Contents of text attachments, by content hash. A text file whose
+    /// contents are not here is reported as not available.
+    pub texts: Option<&'a HashMap<String, String>>,
+    pub support: FileSupport,
+}
+
+/// How an attached file reached the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Delivery {
+    /// Inline, as part of the message text.
+    Text,
+    Image,
+    Pdf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SentAttachment {
+    pub id: Uuid,
+    pub filename: String,
+    pub media_type: String,
+    pub size: u64,
+    pub content_hash: String,
+    pub delivery: Delivery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOmitReason {
+    /// The model cannot read this kind of file.
+    Unsupported,
+    TooLarge,
+    /// The file's bytes are not on this device.
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OmittedAttachment {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub filename: String,
+    pub reason: FileOmitReason,
+}
+
+/// What one post's files add to its message.
+#[derive(Default)]
+struct PostFiles {
+    text: String,
+    sent: Vec<SentAttachment>,
+    omitted: Vec<OmittedAttachment>,
+    tokens: u64,
+}
+
+/// A rough token cost for a file sent as a file: images are scaled by the
+/// provider to about 1,600 tokens at most; PDFs cost per page, which is
+/// guessed from the size.
+fn file_tokens(delivery: Delivery, size: u64) -> u64 {
+    match delivery {
+        Delivery::Text => 0,
+        Delivery::Image => 1_600,
+        Delivery::Pdf => (size / 20).max(1_500),
+    }
+}
+
+/// A file size for people, e.g. "2.3 KB".
+pub fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b < 1024 => format!("{b} bytes"),
+        b if b < 1024 * 1024 => format!("{:.1} KB", b as f64 / 1024.0),
+        b => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+    }
+}
+
+fn post_files(files: &Files, post_id: Uuid) -> PostFiles {
+    let mut out = PostFiles::default();
+    for a in files.attachments.iter().filter(|a| a.post_id == post_id) {
+        let sent = |delivery| SentAttachment {
+            id: a.id,
+            filename: a.filename.clone(),
+            media_type: a.media_type.clone(),
+            size: a.size,
+            content_hash: a.content_hash.clone(),
+            delivery,
+        };
+        let support = files.support;
+        let decision = match a.kind {
+            AttachmentKind::Text => match files.texts.and_then(|t| t.get(&a.content_hash)) {
+                None => Err(FileOmitReason::Missing),
+                Some(text) if text.chars().count() > MAX_INLINE_TEXT_CHARS => {
+                    Err(FileOmitReason::TooLarge)
+                }
+                Some(text) => {
+                    out.text.push_str(&format!(
+                        "\n\n<attachment name=\"{}\" type=\"{}\">\n{}\n</attachment>",
+                        a.filename,
+                        a.media_type,
+                        text.trim_end()
+                    ));
+                    Ok(Delivery::Text)
+                }
+            },
+            AttachmentKind::Image if !support.images => Err(FileOmitReason::Unsupported),
+            AttachmentKind::Image if a.size > support.max_image_bytes => {
+                Err(FileOmitReason::TooLarge)
+            }
+            AttachmentKind::Image => {
+                out.text
+                    .push_str(&format!("\n\n[Attached image: {}]", a.filename));
+                Ok(Delivery::Image)
+            }
+            AttachmentKind::Pdf if !support.pdfs => Err(FileOmitReason::Unsupported),
+            AttachmentKind::Pdf if a.size > support.max_pdf_bytes => Err(FileOmitReason::TooLarge),
+            AttachmentKind::Pdf => {
+                out.text
+                    .push_str(&format!("\n\n[Attached PDF: {}]", a.filename));
+                Ok(Delivery::Pdf)
+            }
+            AttachmentKind::Other => Err(FileOmitReason::Unsupported),
+        };
+        match decision {
+            Ok(delivery) => {
+                out.tokens += file_tokens(delivery, a.size);
+                out.sent.push(sent(delivery));
+            }
+            Err(reason) => {
+                let why = match reason {
+                    FileOmitReason::Unsupported => "You cannot read this kind of file.",
+                    FileOmitReason::TooLarge => "It is too large to send.",
+                    FileOmitReason::Missing => "It is not available on this device.",
+                };
+                out.text.push_str(&format!(
+                    "\n\n[Attached file not included: {} ({}, {}). {why}]",
+                    a.filename,
+                    a.media_type,
+                    human_size(a.size)
+                ));
+                out.omitted.push(OmittedAttachment {
+                    id: a.id,
+                    post_id,
+                    filename: a.filename.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+    out
+}
 
 /// The posts from the root of the thread down to `target`, oldest first.
 pub fn ancestry(posts: &[Post], target: Uuid) -> Result<Vec<&Post>> {
@@ -67,6 +230,9 @@ pub struct SentMessage {
     pub text: String,
     pub source: Source,
     pub post_ids: Vec<Uuid>,
+    /// Files sent with the message; text files are inside `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SentAttachment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,23 +265,49 @@ pub struct SentContext {
     /// differently; this is only for orientation and trimming.
     pub estimated_tokens: u64,
     pub budget_tokens: u64,
+    /// Files on posts that were sent, but which this model could not take.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub omitted_attachments: Vec<OmittedAttachment>,
 }
 
 impl SentContext {
-    /// The request for the provider adapter.
-    pub fn request(&self) -> ModelRequest {
-        ModelRequest {
-            model: self.model.clone(),
-            instructions: self.instructions.clone(),
-            messages: self
-                .messages
-                .iter()
-                .map(|m| Message {
+    /// The request for the provider adapter. `read` returns the bytes of
+    /// an attached file by content hash; it is called only for images and
+    /// PDFs being sent.
+    pub fn request(&self, read: impl Fn(&str) -> Result<Vec<u8>>) -> Result<ModelRequest> {
+        let messages = self
+            .messages
+            .iter()
+            .map(|m| {
+                let files = m
+                    .attachments
+                    .iter()
+                    .filter_map(|a| {
+                        let kind = match a.delivery {
+                            Delivery::Text => return None,
+                            Delivery::Image => FileKind::Image,
+                            Delivery::Pdf => FileKind::Pdf,
+                        };
+                        Some(read(&a.content_hash).map(|data| FilePart {
+                            filename: a.filename.clone(),
+                            media_type: a.media_type.clone(),
+                            kind,
+                            data,
+                        }))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Message {
                     role: m.role,
                     text: m.text.clone(),
+                    files,
                 })
-                .collect(),
-        }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ModelRequest {
+            model: self.model.clone(),
+            instructions: self.instructions.clone(),
+            messages,
+        })
     }
 
     /// Every post whose text was sent, in order.
@@ -162,6 +354,7 @@ pub fn build(
     responder: &Participant,
     model: &str,
     budget_tokens: u64,
+    files: Files,
 ) -> Result<SentContext> {
     let chain = ancestry(posts, target)?;
     let last = chain.last().expect("ancestry includes the target");
@@ -210,6 +403,14 @@ pub fn build(
         }
     }
 
+    let attached: HashMap<Uuid, PostFiles> = posts
+        .iter()
+        .filter(|p| files.attachments.iter().any(|a| a.post_id == p.id))
+        .map(|p| (p.id, post_files(&files, p.id)))
+        .collect();
+    let empty = PostFiles::default();
+    let files_of = |post: &Post| attached.get(&post.id).unwrap_or(&empty);
+
     let render = |entry: &Entry| -> SentMessage {
         match entry {
             Entry::Thread(post) if post.author_id == responder.id => SentMessage {
@@ -217,12 +418,14 @@ pub fn build(
                 text: post.body.clone(),
                 source: Source::Thread,
                 post_ids: vec![post.id],
+                attachments: vec![],
             },
             Entry::Thread(post) => SentMessage {
                 role: Role::User,
-                text: format!("{}:\n{}", name(post), post.body),
+                text: format!("{}:\n{}{}", name(post), post.body, files_of(post).text),
                 source: Source::Thread,
                 post_ids: vec![post.id],
+                attachments: files_of(post).sent.clone(),
             },
             Entry::Context(posts) => {
                 let parts: Vec<String> = posts
@@ -233,7 +436,7 @@ pub fn build(
                         } else {
                             name(p).to_string()
                         };
-                        format!("{who} wrote:\n{}", p.body)
+                        format!("{who} wrote:\n{}{}", p.body, files_of(p).text)
                     })
                     .collect();
                 SentMessage {
@@ -241,18 +444,27 @@ pub fn build(
                     text: format!("{CONTEXT_LABEL}\n\n{}", parts.join("\n\n")),
                     source: Source::Context,
                     post_ids: posts.iter().map(|p| p.id).collect(),
+                    attachments: posts
+                        .iter()
+                        .flat_map(|p| files_of(p).sent.clone())
+                        .collect(),
                 }
             }
         }
     };
 
     let instructions = instructions(&responder.display_name);
+    let cost = |entry: &Entry| -> u64 {
+        let message = render(entry);
+        let file_cost: u64 = message
+            .attachments
+            .iter()
+            .map(|a| file_tokens(a.delivery, a.size))
+            .sum();
+        estimate_tokens(&message.text) + file_cost
+    };
     let total = |entries: &[Entry]| -> u64 {
-        estimate_tokens(&instructions)
-            + entries
-                .iter()
-                .map(|e| estimate_tokens(&render(e).text))
-                .sum::<u64>()
+        estimate_tokens(&instructions) + entries.iter().map(cost).sum::<u64>()
     };
 
     // Trim: the oldest middle chain posts first, then context, oldest first.
@@ -285,6 +497,17 @@ pub fn build(
 
     let messages: Vec<SentMessage> = entries.iter().map(render).collect();
     let estimated_tokens = total(&entries);
+    let omitted_attachments = messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .flat_map(|m| m.post_ids.iter())
+        .flat_map(|id| {
+            attached
+                .get(id)
+                .map(|f| f.omitted.clone())
+                .unwrap_or_default()
+        })
+        .collect();
     Ok(SentContext {
         model: model.to_string(),
         instructions,
@@ -292,6 +515,7 @@ pub fn build(
         omitted,
         estimated_tokens,
         budget_tokens,
+        omitted_attachments,
     })
 }
 
@@ -352,25 +576,29 @@ mod tests {
             &gpt,
             "gpt-5.6",
             ROOMY,
+            Files::default(),
         )
         .unwrap();
 
         assert_eq!(sent.post_ids(), vec![question.id, answer.id, follow_up.id]);
-        let request = sent.request();
+        let request = sent.request(|_| unreachable!("no files")).unwrap();
         assert_eq!(
             request.messages,
             vec![
                 Message {
                     role: Role::User,
-                    text: "Thanos:\nCould Datalog replace our mapping engine?".into()
+                    text: "Thanos:\nCould Datalog replace our mapping engine?".into(),
+                    files: vec![]
                 },
                 Message {
                     role: Role::Assistant,
-                    text: "Yes, with caveats.".into()
+                    text: "Yes, with caveats.".into(),
+                    files: vec![]
                 },
                 Message {
                     role: Role::User,
-                    text: "Thanos:\nWhat about overrides?".into()
+                    text: "Thanos:\nWhat about overrides?".into(),
+                    files: vec![]
                 },
             ]
         );
@@ -399,7 +627,16 @@ mod tests {
         ];
         let everyone = [me, gpt, claude, grok.clone()];
 
-        let sent = build(&posts, &everyone, mine.id, &grok, "grok-5", ROOMY).unwrap();
+        let sent = build(
+            &posts,
+            &everyone,
+            mine.id,
+            &grok,
+            "grok-5",
+            ROOMY,
+            Files::default(),
+        )
+        .unwrap();
 
         let sources: Vec<_> = sent.messages.iter().map(|m| m.source).collect();
         assert_eq!(
@@ -431,7 +668,16 @@ mod tests {
         let later = post(&me, Some(&answer), "and now?", 5);
         let posts = vec![root, aside.clone(), referencing, answer, later.clone()];
 
-        let sent = build(&posts, &[me, gpt.clone()], later.id, &gpt, "m", ROOMY).unwrap();
+        let sent = build(
+            &posts,
+            &[me, gpt.clone()],
+            later.id,
+            &gpt,
+            "m",
+            ROOMY,
+            Files::default(),
+        )
+        .unwrap();
         assert!(
             sent.post_ids().contains(&aside.id),
             "the reference is still there further down"
@@ -451,7 +697,16 @@ mod tests {
         let mut mine = post(&me, Some(&root), "revisit it", 3);
         mine.context_ids = vec![earlier.id];
         let posts = vec![root, earlier, mine.clone()];
-        let sent = build(&posts, &[me, gpt.clone()], mine.id, &gpt, "m", ROOMY).unwrap();
+        let sent = build(
+            &posts,
+            &[me, gpt.clone()],
+            mine.id,
+            &gpt,
+            "m",
+            ROOMY,
+            Files::default(),
+        )
+        .unwrap();
         assert!(
             sent.messages[1]
                 .text
@@ -480,7 +735,16 @@ mod tests {
             target.clone(),
         ];
 
-        let sent = build(&posts, &[me, gpt.clone()], target.id, &gpt, "m", ROOMY).unwrap();
+        let sent = build(
+            &posts,
+            &[me, gpt.clone()],
+            target.id,
+            &gpt,
+            "m",
+            ROOMY,
+            Files::default(),
+        )
+        .unwrap();
         assert_eq!(sent.post_ids(), vec![root.id, target.id]);
         let omitted: Vec<_> = sent.omitted.iter().map(|o| (o.post_id, o.reason)).collect();
         assert_eq!(
@@ -515,17 +779,44 @@ mod tests {
         ];
         let everyone = [me, gpt.clone()];
 
-        let roomy = build(&posts, &everyone, target.id, &gpt, "m", ROOMY).unwrap();
+        let roomy = build(
+            &posts,
+            &everyone,
+            target.id,
+            &gpt,
+            "m",
+            ROOMY,
+            Files::default(),
+        )
+        .unwrap();
         assert!(roomy.omitted.is_empty());
 
         let budget = roomy.estimated_tokens - 150;
-        let tight = build(&posts, &everyone, target.id, &gpt, "m", budget).unwrap();
+        let tight = build(
+            &posts,
+            &everyone,
+            target.id,
+            &gpt,
+            "m",
+            budget,
+            Files::default(),
+        )
+        .unwrap();
         assert!(tight.estimated_tokens <= budget);
         let trimmed: Vec<_> = tight.omitted.iter().map(|o| o.post_id).collect();
         assert_eq!(trimmed, vec![a.id, b.id], "oldest middle posts first");
         assert_eq!(tight.post_ids(), vec![root.id, c.id, side.id, target.id]);
 
-        let tiny = build(&posts, &everyone, target.id, &gpt, "m", 10).unwrap();
+        let tiny = build(
+            &posts,
+            &everyone,
+            target.id,
+            &gpt,
+            "m",
+            10,
+            Files::default(),
+        )
+        .unwrap();
         assert_eq!(
             tiny.post_ids(),
             vec![root.id, target.id],
@@ -542,7 +833,15 @@ mod tests {
         streaming.status = PostStatus::Streaming;
         let posts = vec![root, streaming.clone()];
         assert!(matches!(
-            build(&posts, &[me, gpt.clone()], streaming.id, &gpt, "m", ROOMY),
+            build(
+                &posts,
+                &[me, gpt.clone()],
+                streaming.id,
+                &gpt,
+                "m",
+                ROOMY,
+                Files::default()
+            ),
             Err(Error::Invalid(_))
         ));
     }
@@ -559,5 +858,146 @@ mod tests {
     fn estimates_are_about_four_characters_per_token() {
         assert_eq!(estimate_tokens(""), 4);
         assert_eq!(estimate_tokens(&"a".repeat(400)), 104);
+    }
+
+    fn attachment(post: &Post, name: &str, kind: AttachmentKind, size: u64) -> Attachment {
+        let media_type = match kind {
+            AttachmentKind::Text => "text/markdown",
+            AttachmentKind::Image => "image/png",
+            AttachmentKind::Pdf => "application/pdf",
+            AttachmentKind::Other => "application/zip",
+        };
+        Attachment {
+            id: Uuid::now_v7(),
+            post_id: post.id,
+            filename: name.into(),
+            media_type: media_type.into(),
+            size,
+            content_hash: crate::attachments::content_hash(name.as_bytes()),
+            kind,
+            created_at: UnixMillis(0),
+        }
+    }
+
+    #[test]
+    fn files_go_to_models_that_can_read_them_and_are_named_otherwise() {
+        let me = participant("Thanos", ParticipantKind::Human);
+        let claude = participant("Claude", ParticipantKind::Model);
+        let question = post(&me, None, "What do you make of these?", 1);
+        let files = vec![
+            attachment(&question, "notes.md", AttachmentKind::Text, 7),
+            attachment(&question, "diagram.png", AttachmentKind::Image, 2_000),
+            attachment(&question, "paper.pdf", AttachmentKind::Pdf, 100_000),
+            attachment(
+                &question,
+                "data.zip",
+                AttachmentKind::Other,
+                3 * 1024 * 1024,
+            ),
+        ];
+        let texts = HashMap::from([(files[0].content_hash.clone(), "# Notes\n".to_string())]);
+        let posts = vec![question.clone()];
+        let everyone = [me.clone(), claude.clone()];
+        let ask = |support| {
+            let files = Files {
+                attachments: &files,
+                texts: Some(&texts),
+                support,
+            };
+            build(&posts, &everyone, question.id, &claude, "m", ROOMY, files).unwrap()
+        };
+
+        // A model that takes images and PDFs.
+        let rich = ask(crate::providers::file_support(
+            crate::domain::ProviderKind::Anthropic,
+        ));
+        let message = &rich.messages[0];
+        assert_eq!(
+            message.text,
+            "Thanos:\nWhat do you make of these?\
+             \n\n<attachment name=\"notes.md\" type=\"text/markdown\">\n# Notes\n</attachment>\
+             \n\n[Attached image: diagram.png]\
+             \n\n[Attached PDF: paper.pdf]\
+             \n\n[Attached file not included: data.zip (application/zip, 3.0 MB). You cannot read this kind of file.]"
+        );
+        let deliveries: Vec<Delivery> = message.attachments.iter().map(|a| a.delivery).collect();
+        assert_eq!(
+            deliveries,
+            vec![Delivery::Text, Delivery::Image, Delivery::Pdf]
+        );
+        assert_eq!(rich.omitted_attachments.len(), 1);
+        assert_eq!(
+            rich.omitted_attachments[0].reason,
+            FileOmitReason::Unsupported
+        );
+        // Files count towards the size: 1,600 for the image, 5,000 for the PDF.
+        assert!(rich.estimated_tokens > 6_600);
+
+        let read = |hash: &str| Ok(hash.as_bytes().to_vec());
+        let request = rich.request(read).unwrap();
+        let parts: Vec<(&str, FileKind)> = request.messages[0]
+            .files
+            .iter()
+            .map(|f| (f.filename.as_str(), f.kind))
+            .collect();
+        assert_eq!(
+            parts,
+            vec![
+                ("diagram.png", FileKind::Image),
+                ("paper.pdf", FileKind::Pdf)
+            ]
+        );
+
+        // A text-only model still gets the text file, and is told of the rest.
+        let plain = ask(FileSupport::default());
+        assert!(
+            plain.messages[0]
+                .text
+                .contains("<attachment name=\"notes.md\"")
+        );
+        assert!(
+            plain.messages[0]
+                .text
+                .contains("[Attached file not included: diagram.png")
+        );
+        assert_eq!(plain.omitted_attachments.len(), 3);
+        assert!(
+            plain
+                .request(|_| unreachable!("nothing to read"))
+                .unwrap()
+                .messages[0]
+                .files
+                .is_empty()
+        );
+
+        // Too large, or not on this device.
+        let small = FileSupport {
+            max_image_bytes: 1_000,
+            ..crate::providers::file_support(crate::domain::ProviderKind::OpenAi)
+        };
+        let reasons: Vec<FileOmitReason> = ask(small)
+            .omitted_attachments
+            .iter()
+            .map(|o| o.reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![FileOmitReason::TooLarge, FileOmitReason::Unsupported]
+        );
+        let none = Files {
+            attachments: &files[..1],
+            texts: None,
+            support: FileSupport::default(),
+        };
+        let missing = build(&posts, &everyone, question.id, &claude, "m", ROOMY, none).unwrap();
+        assert_eq!(
+            missing.omitted_attachments[0].reason,
+            FileOmitReason::Missing
+        );
+        assert!(
+            missing.messages[0]
+                .text
+                .contains("It is not available on this device.")
+        );
     }
 }

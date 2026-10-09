@@ -11,6 +11,8 @@ const outcome = (
   result,
   postsAdded,
   postsPresent: 0,
+  attachmentsAdded: 0,
+  attachmentsMissing: 0,
 });
 
 describe("describing an import", () => {

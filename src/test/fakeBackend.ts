@@ -3,7 +3,7 @@
 // SqliteRepository (validation, ordering, draft handling, error messages);
 // the Rust IPC tests check the real commands against the same shapes.
 
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { clearMocks, mockConvertFileSrc, mockIPC } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type {
   Discussion,
@@ -18,6 +18,8 @@ import type {
   Post,
   ProviderConfig,
   Revision,
+  Attachment,
+  StagedAttachment,
   SearchResults,
   SentContext,
 } from "../lib/types";
@@ -47,6 +49,9 @@ export class FakeBackend {
   drafts = new Map<string, Draft>();
   revisions: Revision[] = [];
   calls: { cmd: string; args: Args }[] = [];
+  /** Stored file bytes by content hash, and posted attachments. */
+  blobs = new Map<string, Uint8Array>();
+  attachments: Attachment[] = [];
   /** Conversations the next import_file call brings in, as from ChatGPT. */
   importable: { title: string; body: string }[] = [];
   recent: string[] = [];
@@ -101,6 +106,7 @@ export class FakeBackend {
     mockIPC((cmd, args) => this.handle(cmd, (args ?? {}) as Args), {
       shouldMockEvents: true,
     });
+    mockConvertFileSrc("macos");
     return this;
   }
 
@@ -266,7 +272,63 @@ export class FakeBackend {
         ...this.models.map((m) => ({ ...m.participant })),
       ].filter((p) => authors.has(p.id)),
       draft: this.drafts.get(id) ?? null,
+      attachments: this.attachments.filter((a) =>
+        this.posts.some((p) => p.id === a.postId && p.discussionId === id),
+      ),
     };
+  }
+
+  /** Reads a file sent as length-prefixed metadata JSON, then bytes. */
+  async #stage(body: Uint8Array): Promise<StagedAttachment> {
+    const length = new DataView(body.buffer, body.byteOffset).getUint32(
+      0,
+      true,
+    );
+    const meta = JSON.parse(
+      new TextDecoder().decode(body.slice(4, 4 + length)),
+    ) as {
+      filename: string;
+      mediaType: string;
+    };
+    const bytes = body.slice(4 + length);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const contentHash =
+      "sha256:" +
+      [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+    this.blobs.set(contentHash, bytes);
+    const image = meta.mediaType.startsWith("image/");
+    const text =
+      meta.mediaType.startsWith("text/") || meta.filename.endsWith(".md");
+    return {
+      filename: meta.filename,
+      mediaType:
+        meta.mediaType ||
+        (meta.filename.endsWith(".md")
+          ? "text/markdown"
+          : "application/octet-stream"),
+      size: bytes.length,
+      contentHash,
+      kind: image
+        ? "image"
+        : text
+          ? "text"
+          : meta.mediaType === "application/pdf"
+            ? "pdf"
+            : "other",
+    };
+  }
+
+  #attach(postId: string, files: StagedAttachment[]): void {
+    for (const file of files) {
+      if (!this.blobs.has(file.contentHash))
+        throw `${file.filename} is no longer available; attach it again`;
+      this.attachments.push({
+        ...file,
+        id: this.#id(),
+        postId,
+        createdAt: this.now,
+      });
+    }
   }
 
   #connection(id: unknown): ProviderConfig {
@@ -284,6 +346,8 @@ export class FakeBackend {
       modelDiscovery: true,
       streaming: true,
       usage: !custom,
+      images: !custom,
+      pdfs: !custom,
     };
   }
 
@@ -503,11 +567,18 @@ export class FakeBackend {
       case "get_discussion":
         return this.view(String(args.id));
       case "start_discussion": {
-        const body = this.#cleanBody(args.body);
+        const files =
+          (args.attachments as StagedAttachment[] | undefined) ?? [];
+        const body =
+          files.length > 0 && String(args.body).trim() === ""
+            ? ""
+            : this.#cleanBody(args.body);
         const title =
-          String(args.title).trim() === ""
-            ? this.#cleanTitle(body.split("\n").find((l) => l.trim()) ?? "")
-            : this.#cleanTitle(args.title);
+          String(args.title).trim() !== ""
+            ? this.#cleanTitle(args.title)
+            : body === ""
+              ? this.#cleanTitle(files[0]!.filename)
+              : this.#cleanTitle(body.split("\n").find((l) => l.trim()) ?? "");
         const at = this.now + 60_000;
         const d: Discussion = {
           id: this.#id(),
@@ -518,12 +589,18 @@ export class FakeBackend {
           pinnedAt: null,
         };
         this.discussions.push(d);
-        this.#insertPost(d.id, null, body);
+        const first = this.#insertPost(d.id, null, body);
+        this.#attach(first.id, files);
         return this.view(d.id);
       }
       case "add_post": {
         const d = this.#discussion(args.discussionId);
-        const body = this.#cleanBody(args.body);
+        const files =
+          (args.attachments as StagedAttachment[] | undefined) ?? [];
+        const body =
+          files.length > 0 && String(args.body).trim() === ""
+            ? ""
+            : this.#cleanBody(args.body);
         if (args.parentId === null || args.parentId === undefined)
           throw "a post replies to an earlier post; start a new discussion for a new topic";
         this.#checkParent(d.id, args.parentId);
@@ -543,6 +620,7 @@ export class FakeBackend {
           body,
         );
         post.contextIds = contextIds;
+        this.#attach(post.id, files);
         d.updatedAt = post.createdAt;
         this.drafts.delete(d.id);
         return post;
@@ -561,7 +639,9 @@ export class FakeBackend {
         const id = String(args.discussionId);
         const parentId = (args.parentId as string | null) ?? null;
         const body = String(args.body);
-        if (body.trim() === "" && parentId === null) {
+        const files =
+          (args.attachments as StagedAttachment[] | undefined) ?? [];
+        if (body.trim() === "" && parentId === null && files.length === 0) {
           this.drafts.delete(id);
           return null;
         }
@@ -573,6 +653,7 @@ export class FakeBackend {
           body,
           updatedAt: this.now,
           contextIds: (args.contextIds as string[] | undefined) ?? [],
+          attachments: files,
         });
         return null;
       }
@@ -833,6 +914,18 @@ export class FakeBackend {
       case "clear_recent_searches":
         this.recent = [];
         return null;
+      case "stage_attachment":
+        return this.#stage(args as unknown as Uint8Array);
+      case "discard_staged":
+        this.blobs.delete(String(args.contentHash));
+        return null;
+      case "attachment_text": {
+        const bytes = this.blobs.get(String(args.contentHash));
+        if (!bytes) throw "attached file not found";
+        return { text: new TextDecoder().decode(bytes), truncated: false };
+      }
+      case "save_attachment":
+        return this.dialogPath;
       case "reply_details":
         return this.generations.find((g) => g.postId === args.postId) ?? null;
       case "app_info":

@@ -14,6 +14,10 @@ device.
 - **Search is local.** The search index lives inside the same database, and
   searches never leave the device. Recently used searches are remembered
   there too, and can be cleared from the search field.
+- **Attached files stay here.** They are stored in the data folder and
+  sent to a provider only as part of a request to a model, with the posts
+  they belong to. Deleting a post deletes its files once nothing else uses
+  them.
 - **Exports and backups are yours.** They are written only where you
   choose.
 

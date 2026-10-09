@@ -184,6 +184,134 @@ fn an_archive_from_one_device_imports_into_another() {
     assert!(error.contains("not a Nimata export"), "{error}");
 }
 
+/// Sends a file the way the interface does: metadata length, metadata
+/// JSON, then the bytes.
+fn stage(w: &WebviewWindow<MockRuntime>, name: &str, bytes: &[u8]) -> Value {
+    let meta = json!({ "filename": name, "mediaType": "" }).to_string();
+    let mut body = (meta.len() as u32).to_le_bytes().to_vec();
+    body.extend(meta.as_bytes());
+    body.extend(bytes);
+    get_ipc_response(
+        w,
+        InvokeRequest {
+            cmd: "stage_attachment".into(),
+            callback: CallbackFn(0),
+            error: CallbackFn(1),
+            url: "tauri://localhost".parse().unwrap(),
+            body: InvokeBody::Raw(body),
+            headers: Default::default(),
+            invoke_key: INVOKE_KEY.to_string(),
+        },
+    )
+    .map(|body| body.deserialize::<Value>().unwrap())
+    .unwrap()
+}
+
+#[test]
+fn files_are_staged_posted_previewed_and_deleted() {
+    use tauri::Manager;
+    let w = app();
+    let notes = stage(&w, "notes.md", b"# Notes\n\nStratification.");
+    assert_eq!(notes["kind"], "text");
+    assert_eq!(notes["mediaType"], "text/markdown");
+    let png = stage(&w, "diagram.png", b"\x89PNG\r\n\x1a\n...");
+    assert_eq!(png["kind"], "image");
+
+    let started = invoke(
+        &w,
+        "start_discussion",
+        json!({ "title": "", "body": "", "attachments": [notes] }),
+    )
+    .unwrap();
+    assert_eq!(started["discussion"]["title"], "notes.md");
+    let id = started["discussion"]["id"].clone();
+    let first = started["posts"][0]["id"].clone();
+
+    // In a draft, then posted.
+    invoke(
+        &w,
+        "save_draft",
+        json!({ "discussionId": id, "parentId": first, "body": "", "attachments": [png] }),
+    )
+    .unwrap();
+    let view = invoke(&w, "get_discussion", json!({ "id": id })).unwrap();
+    assert_eq!(view["draft"]["attachments"][0]["filename"], "diagram.png");
+    let reply = invoke(
+        &w,
+        "add_post",
+        json!({ "discussionId": id, "parentId": first, "body": "And a diagram.", "attachments": [png] }),
+    )
+    .unwrap();
+
+    // Previews: text by hash, images through the attachment protocol.
+    let text = invoke(
+        &w,
+        "attachment_text",
+        json!({ "contentHash": notes["contentHash"] }),
+    )
+    .unwrap();
+    assert_eq!(
+        text,
+        json!({ "text": "# Notes\n\nStratification.", "truncated": false })
+    );
+    let hex = png["contentHash"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("sha256:");
+    let image = crate::commands::serve_attachment(w.app_handle(), &format!("/{hex}"));
+    assert_eq!(image.status(), 200);
+    assert_eq!(image.headers()["Content-Type"], "image/png");
+    let notes_hex = notes["contentHash"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("sha256:");
+    let text_file = crate::commands::serve_attachment(w.app_handle(), &format!("/{notes_hex}"));
+    assert_eq!(text_file.status(), 404, "only images are served");
+    assert_eq!(
+        crate::commands::serve_attachment(w.app_handle(), "/../../etc").status(),
+        404
+    );
+
+    // Deleting the reply deletes the image's bytes: nothing else uses them.
+    let store = w.state::<AppState>().blobs().unwrap().clone();
+    let png_hash = png["contentHash"].as_str().unwrap();
+    assert!(store.contains(png_hash));
+    invoke(&w, "delete_post", json!({ "postId": reply["id"] })).unwrap();
+    assert!(!store.contains(png_hash));
+    assert!(store.contains(notes["contentHash"].as_str().unwrap()));
+
+    // A staged file removed before posting is deleted too.
+    let scratch = stage(&w, "scratch.txt", b"draft only");
+    invoke(
+        &w,
+        "discard_staged",
+        json!({ "contentHash": scratch["contentHash"] }),
+    )
+    .unwrap();
+    assert!(!store.contains(scratch["contentHash"].as_str().unwrap()));
+}
+
+#[test]
+fn files_that_vanished_cannot_be_posted() {
+    use tauri::Manager;
+    let w = app();
+    let notes = stage(&w, "notes.md", b"# Notes");
+    let store = w.state::<AppState>().blobs().unwrap().clone();
+    store
+        .remove(notes["contentHash"].as_str().unwrap())
+        .unwrap();
+    let error = invoke(
+        &w,
+        "start_discussion",
+        json!({ "title": "x", "body": "", "attachments": [notes] }),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        json!("notes.md is no longer available; attach it again")
+    );
+}
+
 #[test]
 fn app_info_and_local_user_are_available() {
     let w = app();

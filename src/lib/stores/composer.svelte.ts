@@ -1,4 +1,4 @@
-import type { Draft, Uuid } from "../types";
+import type { Draft, StagedAttachment, Uuid } from "../types";
 
 /** Per-discussion composer state: the post being replied to and the draft. */
 export interface ComposerState {
@@ -6,6 +6,8 @@ export interface ComposerState {
   draft: string;
   /** Posts chosen as context, in the order chosen. */
   context: Uuid[];
+  /** Files added, already stored, in the order added. */
+  attachments: StagedAttachment[];
 }
 
 export type SaveDraft = (
@@ -13,12 +15,14 @@ export type SaveDraft = (
   parentId: Uuid | null,
   body: string,
   contextIds: Uuid[],
+  attachments: StagedAttachment[],
 ) => Promise<void>;
 
 const EMPTY: ComposerState = Object.freeze({
   replyTo: null,
   draft: "",
   context: [],
+  attachments: [],
 });
 
 export const SAVE_DELAY_MS = 400;
@@ -49,6 +53,7 @@ export class Composers {
       replyTo: draft.parentId,
       draft: draft.body,
       context: draft.contextIds ?? [],
+      attachments: draft.attachments ?? [],
     };
   }
 
@@ -70,6 +75,29 @@ export class Composers {
     });
   }
 
+  addAttachment(discussionId: Uuid, file: StagedAttachment): void {
+    this.#update(discussionId, {
+      attachments: [...this.get(discussionId).attachments, file],
+    });
+  }
+
+  /**
+   * Takes out the file at `index`. The draft is saved at once, without it,
+   * so its bytes can be deleted; returns the file.
+   */
+  async removeAttachment(
+    discussionId: Uuid,
+    index: number,
+  ): Promise<StagedAttachment | undefined> {
+    const files = this.get(discussionId).attachments;
+    const removed = files[index];
+    this.#update(discussionId, {
+      attachments: files.filter((_, i) => i !== index),
+    });
+    await this.#saveNow(discussionId);
+    return removed;
+  }
+
   /** Forgets the composer after posting. The database clears its copy itself. */
   clear(discussionId: Uuid): void {
     clearTimeout(this.#pending.get(discussionId));
@@ -80,7 +108,7 @@ export class Composers {
   /** Saves pending changes now, e.g. when the app is being hidden or closed. */
   flush(): void {
     for (const discussionId of [...this.#pending.keys()]) {
-      this.#saveNow(discussionId);
+      void this.#saveNow(discussionId);
     }
   }
 
@@ -89,14 +117,16 @@ export class Composers {
     clearTimeout(this.#pending.get(discussionId));
     this.#pending.set(
       discussionId,
-      setTimeout(() => this.#saveNow(discussionId), SAVE_DELAY_MS),
+      setTimeout(() => void this.#saveNow(discussionId), SAVE_DELAY_MS),
     );
   }
 
-  #saveNow(discussionId: Uuid): void {
+  async #saveNow(discussionId: Uuid): Promise<void> {
     clearTimeout(this.#pending.get(discussionId));
     this.#pending.delete(discussionId);
-    const { replyTo, draft, context } = this.get(discussionId);
-    this.#save(discussionId, replyTo, draft, context).catch(this.#onError);
+    const { replyTo, draft, context, attachments } = this.get(discussionId);
+    await this.#save(discussionId, replyTo, draft, context, attachments).catch(
+      this.#onError,
+    );
   }
 }

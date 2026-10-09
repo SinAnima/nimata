@@ -9,6 +9,7 @@
   import NewDiscussion from "./lib/components/NewDiscussion.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
+  import AttachmentDialog from "./lib/components/AttachmentDialog.svelte";
 
   let settings: SettingsDialog | undefined = $state();
 
@@ -194,3 +195,4 @@
 
 <SettingsDialog bind:this={settings} />
 <ConfirmDialog />
+<AttachmentDialog />

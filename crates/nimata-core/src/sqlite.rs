@@ -10,6 +10,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Row, params}
 use uuid::Uuid;
 
 use crate::archive::{DiscussionArchive, parse_time};
+use crate::attachments::{
+    Attachment, AttachmentKind, BlobStore, MAX_ATTACHMENT_BYTES, StagedAttachment, clean_filename,
+    hash_hex,
+};
 use crate::domain::{
     Discussion, DiscussionFilter, DiscussionSummary, DiscussionView, Draft, Generation,
     GenerationStatus, ModelParticipant, Participant, ParticipantKind, Post, PostStatus,
@@ -31,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_aliases_and_settings.sql"),
     include_str!("../migrations/0005_context_references.sql"),
     include_str!("../migrations/0006_search.sql"),
+    include_str!("../migrations/0007_attachments.sql"),
 ];
 
 /// About how many words of a post a search result shows.
@@ -79,6 +84,26 @@ impl SqliteRepository {
     /// moved into place only after it has been verified, so an interrupted
     /// backup never leaves a partial file under the chosen name.
     pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        self.backup_with_files(dest, None)
+    }
+
+    /// Like [`SqliteRepository::backup_to`], also copying every attached
+    /// file from `store` into the backup (table `backup_files`), so one file
+    /// holds everything.
+    pub fn backup_with_files(&self, dest: &Path, store: Option<&BlobStore>) -> Result<()> {
+        let hashes = match store {
+            Some(_) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT content_hash FROM attachments
+                     UNION
+                     SELECT json_extract(j.value, '$.contentHash')
+                     FROM drafts, json_each(drafts.attachments) j",
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => Vec::new(),
+        };
         let partial = dest.with_extension("partial");
         let remove_partial = || {
             for suffix in ["", "-wal", "-shm"] {
@@ -92,6 +117,24 @@ impl SqliteRepository {
             // The copy inherits WAL mode from the live database. A backup
             // should be a single self-contained file, so switch it back.
             copy.pragma_update(None, "journal_mode", "DELETE")?;
+            if let Some(store) = store {
+                copy.execute_batch(
+                    "CREATE TABLE backup_files (content_hash TEXT PRIMARY KEY, bytes BLOB NOT NULL)",
+                )?;
+                for hash in &hashes {
+                    match store.read(hash) {
+                        Ok(bytes) => {
+                            copy.execute(
+                                "INSERT INTO backup_files (content_hash, bytes) VALUES (?1, ?2)",
+                                params![hash, bytes],
+                            )?;
+                        }
+                        // Not on this device: the backup lists it without bytes.
+                        Err(Error::NotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
             check_database(&copy, &dest.display().to_string())?;
             drop(copy);
             std::fs::rename(&partial, dest)?;
@@ -107,13 +150,53 @@ impl SqliteRepository {
     /// then migrates it if it came from an older version. The backup is
     /// validated first; if it is unusable, nothing changes.
     pub fn restore_from(&mut self, src: &Path) -> Result<()> {
+        self.restore_with_files(src, None)
+    }
+
+    /// Like [`SqliteRepository::restore_from`], first putting the files the
+    /// backup carries into `store` (each checked against its hash).
+    pub fn restore_with_files(&mut self, src: &Path, store: Option<&BlobStore>) -> Result<()> {
         validate_backup(src)?;
+        if let Some(store) = store {
+            let backup =
+                Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let has_files: bool = backup.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'backup_files')",
+                [],
+                |row| row.get(0),
+            )?;
+            if has_files {
+                let mut stmt = backup.prepare("SELECT content_hash, bytes FROM backup_files")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    let hash: String = row.get(0)?;
+                    let bytes: Vec<u8> = row.get(1)?;
+                    if store.put(&bytes)? != hash {
+                        return Err(Error::Corrupt(format!(
+                            "the backup's copy of {hash} is damaged"
+                        )));
+                    }
+                }
+            }
+        }
         self.conn.restore(
             rusqlite::MAIN_DB,
             src,
             None::<fn(rusqlite::backup::Progress)>,
         )?;
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Files carried by the backup are in the blob store now. Compacting
+        // renumbers rowids, which is safe here: the search indexes are
+        // rebuilt below.
+        let carried: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'backup_files')",
+            [],
+            |row| row.get(0),
+        )?;
+        if carried {
+            self.conn
+                .execute_batch("DROP TABLE backup_files; VACUUM;")?;
+        }
         migrate(&mut self.conn)?;
         // The search indexes are keyed by rowid; rebuild them so they match
         // the restored rows exactly.
@@ -423,18 +506,22 @@ impl Repository for SqliteRepository {
         self.participant(id)
     }
 
-    fn start_discussion(
+    fn start_discussion_with_attachments(
         &mut self,
         title: &str,
         author_id: Uuid,
         body: &str,
+        attachments: &[StagedAttachment],
         at: Timestamp,
     ) -> Result<(Discussion, Post)> {
-        let body = clean_body(body)?;
-        let title = if title.trim().is_empty() {
-            clean_title(&title_from_body(&body))?
-        } else {
+        let attachments = clean_staged(attachments)?;
+        let body = post_body(body, &attachments)?;
+        let title = if !title.trim().is_empty() {
             clean_title(title)?
+        } else if body.is_empty() {
+            clean_title(&attachments[0].filename)?
+        } else {
+            clean_title(&title_from_body(&body))?
         };
         let discussion = Discussion {
             id: Uuid::now_v7(),
@@ -457,6 +544,7 @@ impl Repository for SqliteRepository {
             ],
         )?;
         let post = insert_post(&tx, discussion.id, None, author_id, body, at)?;
+        insert_attachments(&tx, post.id, &attachments, at.at)?;
         tx.commit()?;
         Ok((discussion, post))
     }
@@ -549,8 +637,8 @@ impl Repository for SqliteRepository {
         let draft = self
             .conn
             .query_row(
-                "SELECT discussion_id, parent_id, body, updated_at, context_ids FROM drafts
-                 WHERE discussion_id = ?1",
+                "SELECT discussion_id, parent_id, body, updated_at, context_ids, attachments
+                 FROM drafts WHERE discussion_id = ?1",
                 [id.to_string()],
                 |row| {
                     Ok(Draft {
@@ -559,29 +647,41 @@ impl Repository for SqliteRepository {
                         body: row.get(2)?,
                         updated_at: UnixMillis(row.get(3)?),
                         context_ids: json_at(row, 4)?,
+                        attachments: json_at(row, 5)?,
                     })
                 },
             )
             .optional()?;
+
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ATTACHMENT_COLUMNS} FROM attachments a JOIN posts p ON p.id = a.post_id
+             WHERE p.discussion_id = ?1 ORDER BY p.created_at, p.rowid, a.position"
+        ))?;
+        let attachments = stmt
+            .query_map([id.to_string()], attachment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(DiscussionView {
             discussion,
             posts,
             participants,
             draft,
+            attachments,
         })
     }
 
-    fn add_post_with_context(
+    fn add_post_with_attachments(
         &mut self,
         discussion_id: Uuid,
         parent_id: Option<Uuid>,
         author_id: Uuid,
         body: &str,
         context_ids: &[Uuid],
+        attachments: &[StagedAttachment],
         at: Timestamp,
     ) -> Result<Post> {
-        let body = clean_body(body)?;
+        let attachments = clean_staged(attachments)?;
+        let body = post_body(body, &attachments)?;
         let context_ids = self.clean_context(discussion_id, parent_id, context_ids)?;
         let tx = self.conn.transaction()?;
         check_discussion(&tx, discussion_id)?;
@@ -600,6 +700,7 @@ impl Repository for SqliteRepository {
             )?;
         }
         post.context_ids = context_ids;
+        insert_attachments(&tx, post.id, &attachments, at.at)?;
         tx.execute(
             "UPDATE discussions
              SET updated_at = max(updated_at, ?2), modified_at = max(modified_at, ?2)
@@ -705,6 +806,10 @@ impl Repository for SqliteRepository {
             [post_id.to_string()],
         )?;
         tx.execute(
+            "DELETE FROM attachments WHERE post_id = ?1",
+            [post_id.to_string()],
+        )?;
+        tx.execute(
             "UPDATE posts SET body = '', deleted_at = ?2, modified_at = ?2 WHERE id = ?1",
             params![post_id.to_string(), at.0],
         )?;
@@ -723,6 +828,11 @@ impl Repository for SqliteRepository {
         let id = id.to_string();
         tx.execute(
             "DELETE FROM post_revisions
+             WHERE post_id IN (SELECT id FROM posts WHERE discussion_id = ?1)",
+            [&id],
+        )?;
+        tx.execute(
+            "DELETE FROM attachments
              WHERE post_id IN (SELECT id FROM posts WHERE discussion_id = ?1)",
             [&id],
         )?;
@@ -1497,6 +1607,7 @@ impl Repository for SqliteRepository {
         &mut self,
         archive: &DiscussionArchive,
         at: UnixMillis,
+        available: &dyn Fn(&str) -> bool,
     ) -> Result<ImportOutcome> {
         let me = self.local_user()?.id;
         let tx = self.conn.transaction()?;
@@ -1508,15 +1619,18 @@ impl Repository for SqliteRepository {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let outcome = |result, posts_added, posts_present| ImportOutcome {
+        let mut outcome = ImportOutcome {
             discussion_id,
             title: archive.discussion.title.clone(),
-            result,
-            posts_added,
-            posts_present,
+            result: ImportResult::Unchanged,
+            posts_added: 0,
+            posts_present: 0,
+            attachments_added: 0,
+            attachments_missing: 0,
         };
         if let Some((Some(_), _)) = existing {
-            return Ok(outcome(ImportResult::SkippedDeleted, 0, 0));
+            outcome.result = ImportResult::SkippedDeleted;
+            return Ok(outcome);
         }
 
         // Authors: known IDs stay; the exporter becomes the local user.
@@ -1678,6 +1792,35 @@ impl Repository for SqliteRepository {
         }
         for &i in &added {
             let post = &archive.posts[i];
+            if post.deleted_at.is_some() {
+                continue;
+            }
+            for (position, a) in post.attachments.iter().enumerate() {
+                if !available(&a.content_hash) {
+                    outcome.attachments_missing += 1;
+                    continue;
+                }
+                let inserted = tx.execute(
+                    "INSERT OR IGNORE INTO attachments (id, post_id, filename, media_type, size,
+                                                        content_hash, kind, position, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        a.id.to_string(),
+                        post.id.to_string(),
+                        clean_filename(&a.filename),
+                        a.media_type,
+                        a.size as i64,
+                        a.content_hash,
+                        attachment_kind_str(a.kind),
+                        position as i64,
+                        parse_time(&a.created_at)?.0.0
+                    ],
+                )?;
+                outcome.attachments_added += inserted;
+            }
+        }
+        for &i in &added {
+            let post = &archive.posts[i];
             for (position, r) in post.context_ids.iter().enumerate() {
                 tx.execute(
                     "INSERT OR IGNORE INTO context_refs (post_id, ref_post_id, position)
@@ -1701,7 +1844,73 @@ impl Repository for SqliteRepository {
             }
         };
         tx.commit()?;
-        Ok(outcome(result, added.len(), present))
+        outcome.result = result;
+        outcome.posts_added = added.len();
+        outcome.posts_present = present;
+        Ok(outcome)
+    }
+
+    fn attachment(&mut self, id: Uuid) -> Result<Attachment> {
+        self.conn
+            .query_row(
+                &format!("SELECT {ATTACHMENT_COLUMNS} FROM attachments a WHERE a.id = ?1"),
+                [id.to_string()],
+                attachment_from_row,
+            )
+            .optional()?
+            .ok_or(Error::NotFound("attachment"))
+    }
+
+    fn post_attachments(&mut self, post_ids: &[Uuid]) -> Result<Vec<Attachment>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ATTACHMENT_COLUMNS} FROM attachments a WHERE a.post_id = ?1 ORDER BY a.position"
+        ))?;
+        let mut out = Vec::new();
+        for id in post_ids {
+            for a in stmt.query_map([id.to_string()], attachment_from_row)? {
+                out.push(a?);
+            }
+        }
+        Ok(out)
+    }
+
+    fn hash_in_use(&mut self, hash: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM attachments WHERE content_hash = ?1)
+                 OR EXISTS (SELECT 1 FROM drafts, json_each(drafts.attachments) j
+                            WHERE json_extract(j.value, '$.contentHash') = ?1)",
+            [hash],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn hashes_in_use(&mut self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT content_hash FROM attachments
+             UNION
+             SELECT json_extract(j.value, '$.contentHash')
+             FROM drafts, json_each(drafts.attachments) j
+             ORDER BY 1",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn image_type(&mut self, hash: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT media_type FROM attachments WHERE content_hash = ?1 AND kind = 'image'
+                 UNION ALL
+                 SELECT json_extract(j.value, '$.mediaType')
+                 FROM drafts, json_each(drafts.attachments) j
+                 WHERE json_extract(j.value, '$.contentHash') = ?1
+                   AND json_extract(j.value, '$.kind') = 'image'
+                 LIMIT 1",
+                [hash],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     fn recover_interrupted(&mut self, at: UnixMillis) -> Result<usize> {
@@ -1739,15 +1948,21 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    fn save_draft_with_context(
+    fn save_draft_with_attachments(
         &mut self,
         discussion_id: Uuid,
         parent_id: Option<Uuid>,
         body: &str,
         context_ids: &[Uuid],
+        attachments: &[StagedAttachment],
         at: UnixMillis,
     ) -> Result<Option<Draft>> {
-        if body.trim().is_empty() && parent_id.is_none() && context_ids.is_empty() {
+        let attachments = clean_staged(attachments)?;
+        if body.trim().is_empty()
+            && parent_id.is_none()
+            && context_ids.is_empty()
+            && attachments.is_empty()
+        {
             self.conn.execute(
                 "DELETE FROM drafts WHERE discussion_id = ?1",
                 [discussion_id.to_string()],
@@ -1765,17 +1980,19 @@ impl Repository for SqliteRepository {
             .filter(|id| self.clean_context(discussion_id, None, &[*id]).is_ok())
             .collect();
         self.conn.execute(
-            "INSERT INTO drafts (discussion_id, parent_id, body, updated_at, context_ids)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO drafts (discussion_id, parent_id, body, updated_at, context_ids, attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (discussion_id) DO UPDATE
              SET parent_id = excluded.parent_id, body = excluded.body,
-                 updated_at = excluded.updated_at, context_ids = excluded.context_ids",
+                 updated_at = excluded.updated_at, context_ids = excluded.context_ids,
+                 attachments = excluded.attachments",
             params![
                 discussion_id.to_string(),
                 parent_id.map(|id| id.to_string()),
                 body,
                 at.0,
-                serde_json::to_string(&context_ids).expect("UUIDs always serialize")
+                serde_json::to_string(&context_ids).expect("UUIDs always serialize"),
+                serde_json::to_string(&attachments).expect("attachments always serialize")
             ],
         )?;
         Ok(Some(Draft {
@@ -1784,8 +2001,105 @@ impl Repository for SqliteRepository {
             body: body.to_string(),
             updated_at: at,
             context_ids,
+            attachments,
         }))
     }
+}
+
+const ATTACHMENT_COLUMNS: &str =
+    "a.id, a.post_id, a.filename, a.media_type, a.size, a.content_hash, a.kind, a.created_at";
+
+fn attachment_kind_str(kind: AttachmentKind) -> &'static str {
+    match kind {
+        AttachmentKind::Text => "text",
+        AttachmentKind::Image => "image",
+        AttachmentKind::Pdf => "pdf",
+        AttachmentKind::Other => "other",
+    }
+}
+
+fn attachment_from_row(row: &Row) -> rusqlite::Result<Attachment> {
+    let kind: String = row.get(6)?;
+    Ok(Attachment {
+        id: uuid_at(row, 0)?,
+        post_id: uuid_at(row, 1)?,
+        filename: row.get(2)?,
+        media_type: row.get(3)?,
+        size: row.get::<_, i64>(4)? as u64,
+        content_hash: row.get(5)?,
+        kind: match kind.as_str() {
+            "text" => AttachmentKind::Text,
+            "image" => AttachmentKind::Image,
+            "pdf" => AttachmentKind::Pdf,
+            "other" => AttachmentKind::Other,
+            _ => return Err(invalid_text(&kind)),
+        },
+        created_at: UnixMillis(row.get(7)?),
+    })
+}
+
+/// Checks files about to be posted or kept with a draft.
+fn clean_staged(attachments: &[StagedAttachment]) -> Result<Vec<StagedAttachment>> {
+    if attachments.len() > 20 {
+        return Err(Error::Invalid("a post can have at most 20 files".into()));
+    }
+    attachments
+        .iter()
+        .map(|a| {
+            if hash_hex(&a.content_hash).is_none() {
+                return Err(Error::Invalid(format!(
+                    "not a content hash: {}",
+                    a.content_hash
+                )));
+            }
+            if a.size > MAX_ATTACHMENT_BYTES {
+                return Err(Error::Invalid(format!(
+                    "{} is too large to attach",
+                    a.filename
+                )));
+            }
+            Ok(StagedAttachment {
+                filename: clean_filename(&a.filename),
+                ..a.clone()
+            })
+        })
+        .collect()
+}
+
+/// A post's text: required unless files are attached.
+fn post_body(body: &str, attachments: &[StagedAttachment]) -> Result<String> {
+    if body.trim().is_empty() && !attachments.is_empty() {
+        Ok(String::new())
+    } else {
+        clean_body(body)
+    }
+}
+
+fn insert_attachments(
+    conn: &Connection,
+    post_id: Uuid,
+    attachments: &[StagedAttachment],
+    at: UnixMillis,
+) -> Result<()> {
+    for (position, a) in attachments.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO attachments (id, post_id, filename, media_type, size, content_hash,
+                                      kind, position, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                Uuid::now_v7().to_string(),
+                post_id.to_string(),
+                a.filename,
+                a.media_type,
+                a.size as i64,
+                a.content_hash,
+                attachment_kind_str(a.kind),
+                position as i64,
+                at.0
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 const POST_COLUMNS: &str = "id, discussion_id, parent_id, author_id, body, created_at, \

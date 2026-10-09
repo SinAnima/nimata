@@ -35,6 +35,7 @@ async fn a_real_reply_streams_over_tls() {
             messages: vec![Message {
                 role: Role::User,
                 text: "Tester:\nSay hello.".into(),
+                files: vec![],
             }],
         })
         .await

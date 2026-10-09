@@ -105,7 +105,10 @@ later stage.
    discussion (not part of the reply chain):", placed just before the post
    that chose them. References carry down the thread: any model replying
    further down that chain sees them too.
-3. **A short instruction** saying the model is one participant in a
+3. **Files attached to those posts:** text files inline, images and PDFs
+   where the provider accepts them; a file a model cannot read is named
+   but not sent. See [attachments.md](attachments.md#what-models-receive).
+4. **A short instruction** saying the model is one participant in a
    threaded discussion, that context is labelled, and that it should reply
    to the last message.
 

@@ -97,6 +97,19 @@ pub fn discussion_markdown(archive: &DiscussionArchive) -> String {
             out.push_str(post.body.trim_end());
             out.push('\n');
         }
+        if !post.attachments.is_empty() {
+            if !post.body.trim().is_empty() {
+                out.push('\n');
+            }
+            for a in &post.attachments {
+                out.push_str(&format!(
+                    "Attached: {} ({}, {})  \n",
+                    a.filename,
+                    a.media_type,
+                    crate::context::human_size(a.size)
+                ));
+            }
+        }
         match post.status {
             PostStatus::Failed => out.push_str("\n_The reply failed before it finished._\n"),
             PostStatus::Cancelled => {
@@ -142,6 +155,7 @@ mod tests {
             revisions: vec![],
             provider_metadata: None,
             context_ids: vec![],
+            attachments: vec![],
         }
     }
 

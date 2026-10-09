@@ -25,7 +25,9 @@ as an ordinary post that keeps its place in the thread. Models from OpenAI,
 Anthropic, and any OpenAI-compatible server (including local ones such as
 Ollama) can take part in the same discussion. Edit posts while keeping their
 earlier versions, delete posts or discussions, rename and archive
-discussions, and keep unsent drafts. Search every discussion at once, with
+discussions, and keep unsent drafts. Attach files to posts (text and
+Markdown, images, PDFs, anything else): each model receives what it can read
+(see [docs/attachments.md](docs/attachments.md)). Search every discussion at once, with
 filters for author, date, and discussion (see
 [docs/search.md](docs/search.md)). Export a discussion as JSON or Markdown, export
 everything as an open archive, and import archives or your ChatGPT history
